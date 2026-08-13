@@ -1,0 +1,41 @@
+# Curated services shown on the 64x18 dashboard.
+# Copy this file to services.yaml and adapt the examples to your homelab.
+#
+# Supported providers:
+#   container  - Podman/Docker container state and optional CPU/memory metric
+#   systemd    - systemctl is-active
+#   http       - HTTP status check
+#   tcp        - TCP connect check
+
+services:
+  - id: dashboard
+    title: Dashboard
+    provider: container
+    target: dashboard
+    metric: memory
+    pinned: true
+    priority: 10
+
+  - id: web
+    title: Web
+    provider: http
+    target: http://127.0.0.1:8080/health
+    expect: 200
+    timeout: 2
+    pinned: true
+    priority: 20
+
+  - id: ssh
+    title: SSH
+    provider: systemd
+    target: ssh
+    pinned: true
+    priority: 30
+
+  - id: database
+    title: Database
+    provider: tcp
+    target: 127.0.0.1:5432
+    timeout: 2
+    pinned: true
+    priority: 40

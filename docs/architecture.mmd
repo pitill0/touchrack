@@ -1,0 +1,25 @@
+flowchart LR
+    SYS["systemd + openvt<br/>Linux TTY"] --> APP["TouchRack<br/>Textual app"]
+    CFG["config.yaml<br/>services.yaml"] --> APP
+
+    TOUCH["Touchscreen<br/>evdev"] --> TR["TouchReader"]
+    TR --> APP
+
+    APP --> UI["Screens<br/>Host · Services · Containers · Diagnostics"]
+
+    APP --> HOST["HostProvider"]
+    APP --> CONT["ContainersProvider"]
+    APP --> SM["ServicesManager"]
+
+    HOST --> LINUX["Linux / psutil"]
+    CONT --> ENGINE["Podman / Docker"]
+
+    SM --> CP["container"]
+    SM --> SP["systemd"]
+    SM --> HP["HTTP"]
+    SM --> TP["TCP"]
+
+    CP --> ENGINE
+
+    APP --> BLANK["Screen blank / wake guard"]
+    BLANK --> VC["setterm<br/>virtual console"]

@@ -1,0 +1,20 @@
+# Homelab Touch Console configuration.
+# Copy to config.yaml and adjust only what you need.
+
+display:
+  tty: /dev/tty1
+  # 1m, 5m, 15m or on (never blank)
+  sleep: 1m
+
+refresh:
+  # The UI currently normalizes this to 5, 30 or 60 seconds.
+  seconds: 30
+
+touch:
+  enabled: true
+  # auto discovers the supported USB touchscreen.
+  # A /dev/input/eventX path may also be supplied explicitly.
+  device: auto
+
+services:
+  file: services.yaml

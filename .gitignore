@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+dist/
+build/
+*.egg-info/
+
+# Local runtime configuration
+config.yaml
+services.yaml
+
+# Editor / local artifacts
+*~
+*.swp
+.DS_Store
