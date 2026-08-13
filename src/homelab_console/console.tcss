@@ -123,13 +123,13 @@ Screen.compact-touch .resource-metric-row {
 
 Screen.compact-touch .resource-metric-main {
     width: 100%;
-    height: 2;
+    height: 1;
 }
 
 Screen.compact-touch .resource-metric-title {
     width: 6;
     min-width: 6;
-    height: 2;
+    height: 1;
     content-align: left middle;
     color: $text-muted;
     text-style: bold;
@@ -138,7 +138,7 @@ Screen.compact-touch .resource-metric-title {
 Screen.compact-touch .resource-metric-value {
     width: 7;
     min-width: 7;
-    height: 2;
+    height: 1;
     padding-right: 1;
     content-align: right middle;
     text-align: right;
@@ -147,7 +147,7 @@ Screen.compact-touch .resource-metric-value {
 
 Screen.compact-touch .inline-bar {
     width: 1fr;
-    height: 2;
+    height: 1;
     content-align: left middle;
     color: $primary;
     text-style: bold;
@@ -200,25 +200,16 @@ Screen.compact-touch #temperature-state.warm { color: $warning; }
 Screen.compact-touch #temperature-state.hot { color: $error; }
 Screen.compact-touch #temperature-state.unknown { color: $text-muted; }
 
-Screen.compact-touch #temperature-detail {
+Screen.compact-touch #host-uptime {
     width: 1fr;
     height: 1;
     color: $text-muted;
     text-align: right;
+    text-style: bold;
     overflow: hidden;
 }
 
-Screen.compact-touch #host-status {
-    width: 100%;
-    height: 1;
-    margin: 0;
-    padding: 0 1;
-    background: $surface;
-    color: $text-muted;
-    overflow: hidden;
-}
-
-Screen.compact-touch #host-status.has-error {
+Screen.compact-touch #host-uptime.has-error {
     color: $error;
 }
 

@@ -302,7 +302,6 @@ class HomelabConsole(App[None]):
 
     def _update_snapshot_ages(self) -> None:
         """Update freshness labels without triggering data collection."""
-        self.query_one(HostView).update_snapshot_age()
         self.query_one(ContainersView).update_snapshot_age()
         self.query_one(ServicesView).update_snapshot_age()
 

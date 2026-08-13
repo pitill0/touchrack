@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import deque
-from datetime import datetime, timezone
 
 from textual.app import ComposeResult
 from textual.containers import Grid, Horizontal, Vertical
@@ -64,7 +63,7 @@ class ResourceMetricRow(Vertical):
             yield Label(self.title, classes="resource-metric-title")
             yield Label("—", classes="resource-metric-value")
             yield InlineBar(
-                width=34,
+                width=48,
                 warning_at=self.warning_at,
                 critical_at=self.critical_at,
             )
@@ -77,27 +76,24 @@ class ResourceMetricRow(Vertical):
 
 
 class TemperatureRow(Horizontal):
-    """Temperature is intentionally isolated: it is not a percentage meter."""
+    """Compact host footer: temperature on the left, uptime on the right."""
 
     def compose(self) -> ComposeResult:
         yield Label("TEMP", classes="temperature-title")
         yield Label("—", id="temperature-value")
         yield Static("● UNKNOWN", id="temperature-state")
-        yield Label("Waiting for sensor", id="temperature-detail")
+        yield Label("UP —", id="host-uptime")
 
     def set_temperature(self, temperature: float | None) -> None:
         value = self.query_one("#temperature-value", Label)
         state = self.query_one("#temperature-state", Static)
-        detail = self.query_one("#temperature-detail", Label)
         state.remove_class("normal", "warm", "hot", "unknown")
         if temperature is None:
             value.update("—")
             state.update("● UNKNOWN")
             state.add_class("unknown")
-            detail.update("No sensor")
             return
         value.update(f"{temperature:.0f}°C")
-        detail.update("")
         if temperature >= 65:
             state.update("● HOT")
             state.add_class("hot")
@@ -107,6 +103,14 @@ class TemperatureRow(Horizontal):
         else:
             state.update("● NORMAL")
             state.add_class("normal")
+
+    def set_uptime(self, uptime_seconds: float, *, error: str | None = None) -> None:
+        uptime = self.query_one("#host-uptime", Label)
+        uptime.set_class(error is not None, "has-error")
+        if error:
+            uptime.update("DATA ERROR")
+        else:
+            uptime.update(f"UP {_format_uptime(uptime_seconds)}")
 
 
 class HostView(Vertical):
@@ -130,7 +134,6 @@ class HostView(Vertical):
             yield ResourceMetricRow("DISK", warning_at=75, critical_at=90, id="metric-disk")
             yield TemperatureRow(id="metric-temperature")
 
-        yield Static("Refreshing local host data…", id="host-status")
 
     def show_snapshot(self, snapshot: HostSnapshot) -> None:
         self.snapshot = snapshot
@@ -159,33 +162,12 @@ class HostView(Vertical):
             percentage=disk_percent,
             detail=f"{_format_bytes(snapshot.disk_used)} / {_format_bytes(snapshot.disk_total)}",
         )
-        self.query_one("#metric-temperature", TemperatureRow).set_temperature(snapshot.temperature_c)
-
-        status = self.query_one("#host-status", Static)
-        if snapshot.error:
-            status.update(snapshot.error)
-        else:
-            status.update(
-                f"UP {_format_uptime(snapshot.uptime_seconds)}  "
-                f"{snapshot.ip_address or 'IP unavailable'}"
-            )
-        status.set_class(snapshot.error is not None, "has-error")
-
-    def update_snapshot_age(self) -> None:
-        if self.snapshot is None:
-            return
-        elapsed = max(0, int((datetime.now(timezone.utc) - self.snapshot.collected_at).total_seconds()))
-        status = self.query_one("#host-status", Static)
-        if self.snapshot.error:
-            return
-        status.update(
-            f"UP {_format_uptime(self.snapshot.uptime_seconds)}  "
-            f"{self.snapshot.ip_address or 'IP unavailable'}  · {elapsed}s"
-        )
+        temperature_row = self.query_one("#metric-temperature", TemperatureRow)
+        temperature_row.set_temperature(snapshot.temperature_c)
+        temperature_row.set_uptime(snapshot.uptime_seconds, error=snapshot.error)
 
     def show_refreshing(self) -> None:
-        if self.snapshot is None:
-            self.query_one("#host-status", Static).update("Refreshing local host data…")
+        """No animated host footer: refresh cadence is already shown in the header."""
 
 
 def _percentage(used: int, total: int) -> float | None:
