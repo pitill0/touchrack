@@ -142,7 +142,7 @@ class ResourceRankingRow(Horizontal):
 
     def compose(self) -> ComposeResult:
         numeric = _percent_value(self.display_value)
-        width = 11
+        width = 7
         filled = round(min(1.0, numeric / self.maximum) * width)
         bar = "█" * filled + "░" * (width - filled)
         yield Static(self.container_name, classes="resource-ranking-name")
@@ -219,6 +219,11 @@ class ContainersSummary(Vertical):
                 f"{self.snapshot.total}\nTOTAL",
                 classes="btop-total total",
             )
+            yield Button(
+                "LIST",
+                id="containers-view-button",
+                classes="btop-view-button",
+            )
 
         with Grid(id="btop-container-rankings"):
             yield BtopRanking("CPU HOTSPOTS", top_cpu, "cpu")
@@ -247,6 +252,11 @@ class ContainersCompactList(VerticalScroll):
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="compact-list-header"):
+            yield Button(
+                "BACK",
+                id="containers-view-button",
+                classes="compact-view-button",
+            )
             yield Button(
                 self._header_label("NAME", "name"),
                 id="container-sort-name",
@@ -291,7 +301,6 @@ class ContainersView(Vertical):
             yield Button("SLEEP 1m", id="screen-blank-containers", classes="screen-blank-button flat-control")
 
         with Horizontal(id="containers-context"):
-            yield Button("SUMMARY", id="containers-view-button", classes="flat-control")
             yield Static("Reading local containers…", id="containers-status")
         yield Label("Waiting", id="containers-last-update")
         yield Vertical(id="containers-body")
@@ -302,8 +311,6 @@ class ContainersView(Vertical):
 
     def toggle_view(self) -> None:
         self.view_mode = "list" if self.view_mode == "summary" else "summary"
-        label = "LIST" if self.view_mode == "list" else "SUMMARY"
-        self.query_one("#containers-view-button", Button).label = label
         self._render_body()
 
     def set_sort(self, key: str) -> None:
@@ -365,7 +372,9 @@ class ContainersView(Vertical):
             health.update("● WARN")
             health.add_class("degraded")
         else:
-            status.update(f"{snapshot.total} containers · {snapshot.running} running · {snapshot.stopped} stopped")
+            # Healthy totals are already shown prominently in the summary cards.
+            # Keep this line free for warnings/errors rather than duplicating them.
+            status.update("")
             status.remove_class("has-error", "has-warning")
             health.update("● OK")
             health.add_class("healthy")

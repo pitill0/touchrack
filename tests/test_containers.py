@@ -5,6 +5,7 @@ import pytest
 from homelab_console.app import HomelabConsole
 from homelab_console.models import ContainerInfo, ContainersSnapshot, HostSnapshot
 
+from homelab_console.screens.containers import ResourceRankingRow
 
 class FakeHostProvider:
     async def collect(self) -> HostSnapshot:
@@ -57,16 +58,20 @@ async def test_containers_view_lists_local_podman_rows() -> None:
         containers_refresh_seconds=3600,
         touch_enabled=False,
     )
-    async with app.run_test(size=(100, 37)) as pilot:
+    async with app.run_test(size=(64, 18)) as pilot:
         await pilot.pause()
         await pilot.click("#nav-containers")
         await pilot.pause()
 
+        view_button = app.query_one("#containers-view-button")
+        assert str(view_button.label) == "LIST"
+        assert app.screen.region.contains_region(view_button.region)
+
         # Current summary UI exposes totals through the compact context/status
         # and the three btop-style total cells.
-        assert str(app.query_one("#containers-status").content) == (
-            "2 containers · 1 running · 1 stopped"
-        )
+        # Healthy totals are shown by the large RUNNING / STOPPED / TOTAL cells;
+        # the context status line is reserved for warning/error messages.
+        assert str(app.query_one("#containers-status").content) == ""
         totals = [str(widget.content) for widget in app.query(".btop-total")]
         assert "1\nRUNNING" in totals
         assert "1\nSTOPPED" in totals
@@ -75,7 +80,19 @@ async def test_containers_view_lists_local_podman_rows() -> None:
         # LIST mode is the current row-oriented container view.
         await pilot.click("#containers-view-button")
         await pilot.pause()
+        back_button = app.query_one("#containers-view-button")
+        assert str(back_button.label) == "BACK"
+        assert app.screen.region.contains_region(back_button.region)
         assert len(app.query(".compact-container-row")) == 2
+
+
+def test_resource_ranking_bar_uses_compact_seven_cell_meter() -> None:
+    row = ResourceRankingRow("svc-cadvisor", "50.00%", maximum=100.0)
+    children = list(row.compose())
+
+    assert str(children[0].content) == "svc-cadvisor"
+    assert len(str(children[1].content)) == 7
+    assert str(children[2].content) == "50.00%"
 
 
 @pytest.mark.asyncio
@@ -87,7 +104,7 @@ async def test_containers_view_shows_detected_engine_and_menu() -> None:
         containers_refresh_seconds=3600,
         touch_enabled=False,
     )
-    async with app.run_test(size=(100, 37)) as pilot:
+    async with app.run_test(size=(64, 18)) as pilot:
         await pilot.pause()
         await pilot.click("#nav-containers")
         await pilot.pause()
