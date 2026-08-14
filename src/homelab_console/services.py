@@ -45,6 +45,7 @@ class ServiceState:
     pinned: bool = True
     group: str = "core"
     error: str | None = None
+    details: tuple[tuple[str, str], ...] = ()
 
     @property
     def is_attention(self) -> bool:
@@ -99,7 +100,24 @@ class ContainerSnapshotServiceProvider:
         else:
             primary = "RUNNING" if container.is_running else "STOPPED"
         secondary = container.status
-        return _state(definition, status, primary, secondary, checked_at)
+        details = (
+            ("STATE", "RUNNING" if container.is_running else "STOPPED"),
+            ("CPU", container.cpu_percent or "--"),
+            ("MEMORY", container.memory_percent or "--"),
+            ("USAGE", container.memory_usage or "No live stats"),
+            ("IMAGE", container.image or "--"),
+            ("CONTAINER", container.name),
+            ("STATUS", container.status or "--"),
+            ("ENGINE", snapshot.engine or "Unknown"),
+        )
+        return _state(
+            definition,
+            status,
+            primary,
+            secondary,
+            checked_at,
+            details=details,
+        )
 
 
 class SystemdServiceProvider:
@@ -123,9 +141,21 @@ class SystemdServiceProvider:
                 definition.target,
                 checked_at,
                 error=None if active else text or "systemctl reported inactive",
+                details=(
+                    ("STATE", text.upper() if text else "UNKNOWN"),
+                    ("UNIT", definition.target),
+                ),
             )
         except (FileNotFoundError, asyncio.TimeoutError) as exc:
-            return _state(definition, "UNKNOWN", "Unavailable", str(exc), checked_at, error=str(exc))
+            return _state(
+                definition,
+                "UNKNOWN",
+                "Unavailable",
+                str(exc),
+                checked_at,
+                error=str(exc),
+                details=(("UNIT", definition.target),),
+            )
 
 
 class HttpServiceProvider:
@@ -150,9 +180,28 @@ class HttpServiceProvider:
                 f"{latency_ms} ms",
                 checked_at,
                 error=None if ok else f"Expected HTTP {expected}",
+                details=(
+                    ("HTTP", str(code)),
+                    ("LATENCY", f"{latency_ms} ms"),
+                    ("EXPECTED", str(expected)),
+                    ("TIMEOUT", f"{timeout:g}s"),
+                    ("URL", definition.target),
+                ),
             )
         except (urllib_error.URLError, TimeoutError, ValueError) as exc:
-            return _state(definition, "ERROR", "HTTP DOWN", str(exc), checked_at, error=str(exc))
+            return _state(
+                definition,
+                "ERROR",
+                "HTTP DOWN",
+                str(exc),
+                checked_at,
+                error=str(exc),
+                details=(
+                    ("EXPECTED", str(expected)),
+                    ("TIMEOUT", f"{timeout:g}s"),
+                    ("URL", definition.target),
+                ),
+            )
 
 
 class TcpServiceProvider:
@@ -166,9 +215,34 @@ class TcpServiceProvider:
         try:
             with socket.create_connection((host, port), timeout=timeout):
                 pass
-            return _state(definition, "OK", f"TCP {port}", host, checked_at)
+            return _state(
+                definition,
+                "OK",
+                f"TCP {port}",
+                host,
+                checked_at,
+                details=(
+                    ("STATE", "OPEN"),
+                    ("HOST", host),
+                    ("PORT", str(port)),
+                    ("TIMEOUT", f"{timeout:g}s"),
+                ),
+            )
         except OSError as exc:
-            return _state(definition, "ERROR", "TCP DOWN", str(exc), checked_at, error=str(exc))
+            return _state(
+                definition,
+                "ERROR",
+                "TCP DOWN",
+                str(exc),
+                checked_at,
+                error=str(exc),
+                details=(
+                    ("STATE", "DOWN"),
+                    ("HOST", host),
+                    ("PORT", str(port)),
+                    ("TIMEOUT", f"{timeout:g}s"),
+                ),
+            )
 
 
 class ServicesRegistry:
@@ -218,7 +292,7 @@ class ServicesManager:
         registry: ServicesRegistry,
         providers: Mapping[str, ServiceProvider],
         *,
-        max_visible: int = 6,
+        max_visible: int | None = None,
     ) -> None:
         self.registry = registry
         self.providers = dict(providers)
@@ -258,7 +332,7 @@ class ServicesManager:
             return _state(definition, "ERROR", "Check failed", str(exc), datetime.now(timezone.utc), error=str(exc))
 
 
-def _select_visible(states: list[ServiceState], max_visible: int) -> list[ServiceState]:
+def _select_visible(states: list[ServiceState], max_visible: int | None) -> list[ServiceState]:
     # Unpinned warning/error services are promoted temporarily. Pinned services
     # remain the normal dashboard set, ordered by explicit priority.
     attention = [state for state in states if state.is_attention and not state.pinned]
@@ -272,7 +346,7 @@ def _select_visible(states: list[ServiceState], max_visible: int) -> list[Servic
             continue
         seen.add(state.id)
         deduped.append(state)
-    return deduped[:max_visible]
+    return deduped if max_visible is None else deduped[:max_visible]
 
 
 def _state(
@@ -283,6 +357,7 @@ def _state(
     checked_at: datetime,
     *,
     error: str | None = None,
+    details: tuple[tuple[str, str], ...] = (),
 ) -> ServiceState:
     normalized = status if status in SERVICE_STATUSES else "UNKNOWN"
     return ServiceState(
@@ -298,6 +373,7 @@ def _state(
         pinned=definition.pinned,
         group=definition.group,
         error=error,
+        details=details,
     )
 
 

@@ -263,12 +263,14 @@ Screen.compact-touch #services-status {
 Screen.compact-touch #services-status.has-warning { color: $warning; }
 Screen.compact-touch #services-status.has-error { color: $error; }
 
+
 Screen.compact-touch #services-grid {
-    grid-size: 2 3;
-    grid-gutter: 1 3;
+    grid-size: 3 4;
+    grid-gutter: 0 1;
     width: 100%;
     height: 8;
-    padding: 0 2;
+    margin: 0;
+    padding: 0 1;
 }
 
 Screen.compact-touch .service-card {
@@ -280,15 +282,16 @@ Screen.compact-touch .service-card {
     border: none;
     background: $surface-lighten-1;
     color: $text;
-    content-align: left top;
+    content-align: left middle;
     text-align: left;
+    overflow: hidden;
 }
 
 Screen.compact-touch .service-card.status-ok { color: $text; }
-Screen.compact-touch .service-card.status-idle { color: $text-muted; }
-Screen.compact-touch .service-card.status-warn { color: $warning; }
-Screen.compact-touch .service-card.status-error { color: $error; }
-Screen.compact-touch .service-card.status-unknown { color: $text-muted; }
+Screen.compact-touch .service-card.status-idle { color: $text; }
+Screen.compact-touch .service-card.status-warn { color: $text; }
+Screen.compact-touch .service-card.status-error { color: $text; }
+Screen.compact-touch .service-card.status-unknown { color: $text; }
 
 Screen.compact-touch .service-card.service-card-empty {
     visibility: hidden;
@@ -297,6 +300,43 @@ Screen.compact-touch .service-card.service-card-empty {
 Screen.compact-touch .service-card:focus,
 Screen.compact-touch .service-card:hover {
     background: $surface-lighten-2;
+    text-style: bold;
+}
+
+
+Screen.compact-touch #services-pager {
+    width: 100%;
+    height: 2;
+    margin: 0;
+    padding: 0 16;
+    background: transparent;
+}
+
+Screen.compact-touch #services-pager.pager-hidden {
+    display: none;
+}
+
+Screen.compact-touch .services-page-button {
+    width: 8;
+    min-width: 8;
+    height: 2;
+    min-height: 2;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: $surface-lighten-1;
+    color: $primary;
+    content-align: center middle;
+    text-align: center;
+    text-style: bold;
+}
+
+Screen.compact-touch #services-page-indicator {
+    width: 1fr;
+    height: 2;
+    color: $text-muted;
+    content-align: center middle;
+    text-align: center;
     text-style: bold;
 }
 
@@ -767,7 +807,7 @@ ServiceDetailScreen {
 
 ServiceDetailScreen #service-detail-dialog {
     width: 62;
-    height: 16;
+    height: 17;
     padding: 0 1;
     border: round $primary;
     background: $surface;
@@ -810,7 +850,7 @@ ServiceDetailScreen #service-detail-state.status-unknown { color: $text-muted; }
 
 ServiceDetailScreen .service-detail-line {
     width: 100%;
-    height: 2;
+    height: 1;
     color: $text;
     overflow: hidden;
 }
