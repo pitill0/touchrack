@@ -63,3 +63,58 @@ class ContainersSnapshot:
     @property
     def stopped(self) -> int:
         return self.total - self.running
+
+
+
+@dataclass(frozen=True, slots=True)
+class FilesystemInfo:
+    device: str
+    mountpoint: str
+    filesystem: str
+    mount_options: str
+    total: int
+    used: int
+    free: int
+    usage_percent: float
+
+
+@dataclass(frozen=True, slots=True)
+class StorageSnapshot:
+    filesystems: tuple[FilesystemInfo, ...]
+    collected_at: datetime
+    error: str | None = None
+
+    @property
+    def total(self) -> int:
+        return len(self.filesystems)
+
+
+
+@dataclass(frozen=True, slots=True)
+class DiskHealthInfo:
+    device: str
+    name: str
+    model: str | None
+    serial: str | None
+    protocol: str | None
+    size: int | None
+    temperature_c: float | None
+    smart_passed: bool | None
+    power_on_hours: int | None = None
+    power_cycles: int | None = None
+    percentage_used: int | None = None
+    unsafe_shutdowns: int | None = None
+    media_errors: int | None = None
+    details: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class DiskHealthSnapshot:
+    disks: tuple[DiskHealthInfo, ...]
+    collected_at: datetime
+    available: bool = True
+    error: str | None = None
+
+    @property
+    def total(self) -> int:
+        return len(self.disks)

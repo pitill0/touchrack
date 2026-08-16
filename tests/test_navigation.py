@@ -35,6 +35,10 @@ async def test_navigation_is_click_only() -> None:
         assert app.query_one("#view-host").has_class("hidden")
         assert not app.query_one("#view-services").has_class("hidden")
 
+        await pilot.click("#nav-storage")
+        assert app.active_section == "storage"
+        assert not app.query_one("#view-storage").has_class("hidden")
+
         await pilot.click("#nav-containers")
         assert app.active_section == "containers"
         assert not app.query_one("#view-containers").has_class("hidden")
@@ -56,3 +60,30 @@ async def test_compact_menu_opens_and_closes_by_click() -> None:
         await pilot.click("#menu-close")
         await pilot.pause()
         assert app.screen.id != "menu-dialog"
+
+
+
+@pytest.mark.asyncio
+async def test_four_way_navigation_fits_physical_64x18() -> None:
+    app = HomelabConsole(
+        provider=FakeProvider(),
+        refresh_seconds=3600,
+        screen_blank_minutes=0,
+        touch_enabled=False,
+    )
+    async with app.run_test(size=(64, 18)) as pilot:
+        await pilot.pause()
+        assert app.screen.has_class("compact-touch")
+
+        for button_id in (
+            "#nav-host",
+            "#nav-services",
+            "#nav-storage",
+            "#nav-containers",
+        ):
+            button = app.query_one(button_id)
+            assert app.screen.region.contains_region(button.region)
+
+        await pilot.click("#nav-storage")
+        assert app.active_section == "storage"
+        assert not app.query_one("#view-storage").has_class("hidden")
