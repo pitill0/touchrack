@@ -16,12 +16,17 @@ from homelab_console.config import load_config
 from homelab_console.providers import (
     AutoContainersProvider,
     ContainersProvider,
+    DiskHealthProvider,
     HostProvider,
     LocalHostProvider,
+    LocalStorageProvider,
+    SmartctlDiskHealthProvider,
+    StorageProvider,
 )
-from homelab_console.screens import ContainersView, HostView, ServicesView
+from homelab_console.screens import ContainersView, HostView, ServicesView, StorageView
 from homelab_console.screens.containers import ContainerDetailScreen
 from homelab_console.screens.services import ServiceDetailScreen
+from homelab_console.screens.storage import DiskDetailScreen, StorageDetailScreen
 from homelab_console.services import (
     ContainerSnapshotServiceProvider,
     HttpServiceProvider,
@@ -111,6 +116,8 @@ class HomelabConsole(App[None]):
         self,
         provider: HostProvider | None = None,
         containers_provider: ContainersProvider | None = None,
+        storage_provider: StorageProvider | None = None,
+        disk_health_provider: DiskHealthProvider | None = None,
         refresh_seconds: float = 5.0,
         containers_refresh_seconds: float | None = None,
         screen_blank_minutes: int = 1,
@@ -123,6 +130,10 @@ class HomelabConsole(App[None]):
         super().__init__()
         self.provider = provider or LocalHostProvider()
         self.containers_provider = containers_provider or AutoContainersProvider()
+        self.storage_provider = storage_provider or LocalStorageProvider()
+        self.disk_health_provider = (
+            disk_health_provider or SmartctlDiskHealthProvider()
+        )
         self.refresh_options = (5.0, 30.0, 60.0)
         self.refresh_seconds = self._normalize_refresh_interval(refresh_seconds)
         # Kept for compatibility with the earlier spike API; refresh is now global.
@@ -159,6 +170,10 @@ class HomelabConsole(App[None]):
                 id="view-services",
                 classes="section-view hidden",
             )
+            yield StorageView(
+                id="view-storage",
+                classes="section-view hidden",
+            )
             yield ContainersView(
                 id="view-containers",
                 classes="section-view hidden",
@@ -166,11 +181,15 @@ class HomelabConsole(App[None]):
         with Horizontal(id="navigation"):
             yield Button("HOST", id="nav-host", classes="nav active", variant="primary")
             yield Button("SERVICES", id="nav-services", classes="nav")
+            yield Button("STORAGE", id="nav-storage", classes="nav")
             yield Button("CONTAINERS", id="nav-containers", classes="nav")
 
     def on_mount(self) -> None:
-        self.refresh_host()
-        self.refresh_containers()
+        # Defer the initial workers until Textual has completed the first
+        # compose/mount/refresh cycle. StorageView now has nested composed
+        # controls, and starting a worker directly from App.on_mount can race
+        # those children being attached to the DOM.
+        self.call_after_refresh(self._initial_refresh)
         self._last_scheduled_refresh = monotonic()
         self.set_interval(1.0, self._refresh_scheduler_tick)
         # Keep display sleep independent from data refresh / modal screens.
@@ -182,6 +201,11 @@ class HomelabConsole(App[None]):
         self._update_screen_blank_controls()
         self._apply_screen_blank_setting()
         self._start_touch_reader()
+
+    def _initial_refresh(self) -> None:
+        self.refresh_host()
+        self.refresh_containers()
+        self.refresh_storage()
 
     def on_resize(self, event: events.Resize) -> None:
         self._apply_layout_profile()
@@ -367,6 +391,7 @@ class HomelabConsole(App[None]):
         self._last_scheduled_refresh = now
         self.refresh_host()
         self.refresh_containers()
+        self.refresh_storage()
 
     def _screen_blank_tick(self) -> None:
         """Drive display sleep from a dedicated app-level timer."""
@@ -380,6 +405,7 @@ class HomelabConsole(App[None]):
         # Apply the new selection immediately, then start counting the new interval.
         self.refresh_host()
         self.refresh_containers()
+        self.refresh_storage()
 
     def _update_refresh_controls(self) -> None:
         label = f"REF {int(self.refresh_seconds)}s" if self.screen.has_class("compact-touch") else f"REFRESH {int(self.refresh_seconds)}s"
@@ -465,6 +491,15 @@ class HomelabConsole(App[None]):
         containers_view.show_snapshot(snapshot)
         self.refresh_services()
 
+    @work(exclusive=True, group="storage-refresh")
+    async def refresh_storage(self) -> None:
+        storage_view = self.query_one(StorageView)
+        storage_view.show_refreshing()
+        snapshot = await self.storage_provider.collect()
+        disk_snapshot = await self.disk_health_provider.collect()
+        storage_view.show_snapshot(snapshot)
+        storage_view.show_disk_snapshot(disk_snapshot)
+
     @work(exclusive=True, group="services-refresh")
     async def refresh_services(self) -> None:
         services_view = self.query_one(ServicesView)
@@ -480,13 +515,28 @@ class HomelabConsole(App[None]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
-        if button_id in {"menu-button", "menu-button-containers", "menu-button-services"}:
+        if button_id in {
+            "menu-button",
+            "menu-button-containers",
+            "menu-button-services",
+            "menu-button-storage",
+        }:
             self.push_screen(ConsoleMenu())
             return
-        if button_id in {"refresh-interval-host", "refresh-interval-containers", "refresh-interval-services"}:
+        if button_id in {
+            "refresh-interval-host",
+            "refresh-interval-containers",
+            "refresh-interval-services",
+            "refresh-interval-storage",
+        }:
             self.cycle_refresh_interval()
             return
-        if button_id in {"screen-blank-host", "screen-blank-containers", "screen-blank-services"}:
+        if button_id in {
+            "screen-blank-host",
+            "screen-blank-containers",
+            "screen-blank-services",
+            "screen-blank-storage",
+        }:
             self.cycle_screen_blank()
             return
         if button_id == "containers-view-button":
@@ -509,16 +559,26 @@ class HomelabConsole(App[None]):
             if state is not None:
                 self.push_screen(ServiceDetailScreen(state))
             return
+        if button_id and button_id.startswith("storage-open-"):
+            filesystem = self.query_one(StorageView).filesystem_for_button(button_id)
+            if filesystem is not None:
+                self.push_screen(StorageDetailScreen(filesystem))
+            return
+        if button_id and button_id.startswith("storage-disk-open-"):
+            disk = self.query_one(StorageView).disk_for_button(button_id)
+            if disk is not None:
+                self.push_screen(DiskDetailScreen(disk))
+            return
         if not button_id or not button_id.startswith("nav-"):
             return
         self.show_section(button_id.removeprefix("nav-"))
 
     def show_section(self, section: str) -> None:
-        if section not in {"host", "services", "containers"}:
+        if section not in {"host", "services", "storage", "containers"}:
             raise ValueError(f"Unknown section: {section}")
 
         self.active_section = section
-        for name in ("host", "services", "containers"):
+        for name in ("host", "services", "storage", "containers"):
             self.query_one(f"#view-{name}").set_class(name != section, "hidden")
             button = self.query_one(f"#nav-{name}", Button)
             button.set_class(name == section, "active")
@@ -533,6 +593,10 @@ def main() -> None:
             try:
                 config = load_config()
                 HomelabConsole(
+                    storage_provider=LocalStorageProvider(config.storage.mounts),
+                    disk_health_provider=SmartctlDiskHealthProvider(
+                        devices=config.storage.disks
+                    ),
                     refresh_seconds=config.refresh.seconds,
                     screen_blank_minutes=config.display.sleep_minutes,
                     screen_tty=config.display.tty,

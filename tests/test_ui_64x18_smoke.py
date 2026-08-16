@@ -36,6 +36,15 @@ async def test_physical_64x18_ui_and_modals_mount() -> None:
     async with app.run_test(size=(64, 18)) as pilot:
         await pilot.pause()
         assert app.screen.has_class("compact-touch")
+        assert app.screen.region.contains_region(app.query_one("#nav-storage").region)
+
+        await pilot.click("#nav-storage")
+        await pilot.pause()
+        assert app.active_section == "storage"
+        assert not app.query_one("#view-storage").has_class("hidden")
+
+        await pilot.click("#nav-host")
+        await pilot.pause()
 
         await pilot.click("#menu-button")
         await pilot.pause()

@@ -16,5 +16,16 @@ touch:
   # A /dev/input/eventX path may also be supplied explicitly.
   device: auto
 
+# Optional. Omit either list to keep automatic discovery.
+# When present, order is preserved and only listed entries are shown.
+# storage:
+#   mounts:
+#     - /
+#     - /boot
+#     - /mnt/images
+#   disks:
+#     - /dev/nvme0
+#     - /dev/sda
+
 services:
   file: services.yaml
