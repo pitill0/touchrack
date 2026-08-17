@@ -9,14 +9,16 @@ Wayland, browser or desktop environment required.
 The application is built with [Textual](https://textual.textualize.io/) and
 reads the touchscreen directly through Linux `evdev`.
 
-> Current baseline: **v4.6.2**. Read-only by design.
+> Current release: **v4.7.0**. Read-only by design.
 
 <!-- Add a real 64x18 photo/screenshot here before publishing the repository. -->
 
 ## What it shows
 
 - **Host** — CPU, memory, disk and temperature at a glance.
-- **Services** — up to six curated checks from containers, systemd, HTTP or TCP.
+- **Services** — curated checks from containers, systemd, HTTP or TCP, paged at
+  up to 12 services per screen on the reference layout.
+- **Storage** — filesystem capacity plus optional SMART disk health and detail.
 - **Containers** — Podman/Docker summary, resource hotspots and container detail.
 - **Diagnostics** — runtime display, touch, engine, services, config and sleep state.
 - **Touch wake guard** — the first touch wakes a blanked display without activating
@@ -27,20 +29,50 @@ terminals such as the reference **64×18** console.
 
 ## Requirements
 
+TouchRack itself requires:
+
 - Linux with virtual consoles (`/dev/ttyN`)
 - Python **3.11+**
 - a Unicode-capable Linux console font
-- `kbd` tools (`openvt`, `setfont`, `setterm`)
-- optional touchscreen exposed through `/dev/input/event*`
-- Podman or Docker only if container monitoring is wanted
+- `openvt` and `setfont`
+- `setterm` for display blank/wake
+- `python3-venv` (or equivalent Python `venv` support) for the supplied installer
+- systemd for the supplied boot-time deployment
+- a touchscreen exposed through `/dev/input/event*` only when touch is enabled
+
+Optional features add their own external tools:
+
+- `smartctl` for SMART health in **STORAGE**
+- Podman or Docker for **CONTAINERS**
+- `systemctl` for `systemd` entries in **SERVICES**
+
+On Ubuntu 24.04, the reference host dependencies are:
+
+```bash
+sudo apt install python3 python3-venv kbd util-linux console-setup-linux
+```
+
+Optional monitoring features:
+
+```bash
+sudo apt install smartmontools
+sudo apt install podman        # or install Docker / docker.io
+```
 
 The reference Ubuntu setup uses:
 
 ```text
 /dev/tty1
-Uni3-Terminus32x16.psf.gz
+/usr/share/consolefonts/Uni3-Terminus32x16.psf.gz
 1024×600 → 64×18 cells
 ```
+
+Python runtime dependencies (`textual`, `psutil`, `evdev` on Linux and
+`PyYAML`) are declared in `pyproject.toml` and installed into the TouchRack
+virtual environment.
+
+See [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) for the complete dependency
+matrix, including build/development and optional feature dependencies.
 
 No X11, Wayland or browser is required.
 
@@ -70,10 +102,26 @@ sudo openvt -c 1 -f -s -- \
   "$(pwd)/.venv/bin/homelab-console"
 ```
 
-For normal boot-time use, install the supplied systemd unit:
+For normal boot-time use, deploy the supplied systemd unit:
 
 ```bash
 sudo ./scripts/install-systemd.sh
+sudo systemctl restart homelab-touch-console.service
+```
+
+The installer builds a **non-editable, root-owned runtime** in
+`/opt/touchrack`, keeps runtime configuration in `/etc/touchrack`, and
+points systemd at those paths. The source checkout remains a development
+tree and is never executed directly by the root service.
+
+On the first deployment, an existing local `config.yaml` and
+`services.yaml` are migrated into `/etc/touchrack`. Later deployments do
+not overwrite those files. `scripts/uninstall-systemd.sh` removes the
+runtime and unit but deliberately preserves `/etc/touchrack`.
+
+To enable the service at boot as well:
+
+```bash
 sudo systemctl enable --now homelab-touch-console.service
 ```
 
@@ -174,13 +222,17 @@ flowchart LR
     TOUCH["Touchscreen<br/>evdev"] --> TR["TouchReader"]
     TR --> APP
 
-    APP --> UI["Screens<br/>Host · Services · Containers · Diagnostics"]
+    APP --> UI["Screens<br/>Host · Services · Storage · Containers · Diagnostics"]
 
     APP --> HOST["HostProvider"]
+    APP --> STORE["StorageProvider"]
+    APP --> SMART["DiskHealthProvider"]
     APP --> CONT["ContainersProvider"]
     APP --> SM["ServicesManager"]
 
     HOST --> LINUX["Linux / psutil"]
+    STORE --> LINUX
+    SMART --> SCT["smartctl (optional)"]
     CONT --> ENGINE["Podman / Docker"]
 
     SM --> CP["container"]
@@ -208,12 +260,15 @@ src/homelab_console/  # internal Python package
 ├── app.py               application coordination and navigation
 ├── config.py            application configuration
 ├── models.py            host/container state models
-├── providers/           host and container data providers
-├── screens/             Host, Services and Containers UI
+├── providers/           host, storage, SMART and container providers
+├── screens/             Host, Services, Storage and Containers UI
 ├── services.py          service registry/providers/normalization
 ├── touch.py             direct evdev touchscreen input
 ├── screen_blank.py      Linux VC sleep/wake helpers
 ├── single_instance.py   single-instance lock
+├── button_actions.py    pure button-routing classification
+├── refresh_policy.py    pure refresh interval policy
+├── runtime_diagnostics.py  diagnostics formatting
 └── console.tcss         Textual stylesheet
 ```
 

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import threading
+
 from types import SimpleNamespace
 
 import pytest
@@ -156,3 +159,43 @@ async def test_storage_provider_explicit_empty_selection_returns_no_filesystems(
 
     assert snapshot.error is None
     assert snapshot.filesystems == ()
+
+
+@pytest.mark.asyncio
+async def test_storage_provider_reuses_inflight_collection_after_caller_cancel(
+    monkeypatch,
+) -> None:
+    provider = LocalStorageProvider(())
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def slow_partitions(*, all: bool = False):
+        nonlocal calls
+        calls += 1
+        started.set()
+        assert release.wait(timeout=2.0)
+        return []
+
+    monkeypatch.setattr(
+        "homelab_console.providers.storage.psutil.disk_partitions",
+        slow_partitions,
+    )
+
+    first = asyncio.create_task(provider.collect())
+    assert await asyncio.to_thread(started.wait, 1.0)
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    second = asyncio.create_task(provider.collect())
+    await asyncio.sleep(0.05)
+    assert calls == 1
+
+    release.set()
+    snapshot = await second
+
+    assert snapshot.error is None
+    assert snapshot.filesystems == ()
+    assert calls == 1

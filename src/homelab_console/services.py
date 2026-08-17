@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import math
 import socket
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 from urllib import error as urllib_error
 from urllib import request as urllib_request
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -16,6 +18,9 @@ from homelab_console.models import ContainersSnapshot
 
 
 SERVICE_STATUSES = ("OK", "IDLE", "WARN", "ERROR", "UNKNOWN")
+
+SUPPORTED_SERVICE_PROVIDERS = {"container", "systemd", "http", "tcp"}
+CONTAINER_METRICS = {"status", "cpu", "memory", "mem", "usage"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +125,20 @@ class ContainerSnapshotServiceProvider:
         )
 
 
+
+async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:
+    """Terminate and reap a subprocess after timeout or task cancellation."""
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+    await process.communicate()
+
+
 class SystemdServiceProvider:
+    def __init__(self, timeout_seconds: float = 3.0) -> None:
+        self.timeout_seconds = max(0.1, float(timeout_seconds))
+
     async def check(self, definition: ServiceDefinition) -> ServiceState:
         checked_at = datetime.now(timezone.utc)
         try:
@@ -131,7 +149,30 @@ class SystemdServiceProvider:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=3.0)
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=self.timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                # wait_for() cancels communicate(), not the subprocess itself.
+                # Terminate and reap it so repeated health checks cannot leave
+                # stray systemctl processes behind.
+                await _kill_and_reap(process)
+                message = f"systemctl timed out after {self.timeout_seconds:g}s"
+                return _state(
+                    definition,
+                    "UNKNOWN",
+                    "Unavailable",
+                    message,
+                    checked_at,
+                    error=message,
+                    details=(("UNIT", definition.target),),
+                )
+            except asyncio.CancelledError:
+                await _kill_and_reap(process)
+                raise
+
             text = stdout.decode(errors="replace").strip() or stderr.decode(errors="replace").strip()
             active = process.returncode == 0 and text == "active"
             return _state(
@@ -146,7 +187,7 @@ class SystemdServiceProvider:
                     ("UNIT", definition.target),
                 ),
             )
-        except (FileNotFoundError, asyncio.TimeoutError) as exc:
+        except OSError as exc:
             return _state(
                 definition,
                 "UNKNOWN",
@@ -245,8 +286,12 @@ class TcpServiceProvider:
             )
 
 
+class ServiceConfigError(ValueError):
+    """Raised when services.yaml is structurally invalid."""
+
+
 class ServicesRegistry:
-    """Load declarative service definitions without coupling them to Textual."""
+    """Load and validate declarative service definitions."""
 
     def __init__(self, path: str | Path | None = None) -> None:
         self.path = Path(path).expanduser() if path else _default_config_path()
@@ -254,34 +299,270 @@ class ServicesRegistry:
     def load(self) -> tuple[ServiceDefinition, ...]:
         if self.path is None or not self.path.exists():
             return ()
-        payload = yaml.safe_load(self.path.read_text(encoding="utf-8")) or {}
-        rows = payload.get("services", []) if isinstance(payload, dict) else []
+
+        payload = yaml.safe_load(self.path.read_text(encoding="utf-8"))
+        if payload is None:
+            return ()
+        if not isinstance(payload, dict):
+            raise ServiceConfigError("services.yaml root must be a mapping")
+
+        rows = payload.get("services", [])
+        if not isinstance(rows, list):
+            raise ServiceConfigError("'services' must be a list")
+
         definitions: list[ServiceDefinition] = []
-        for row in rows:
+        seen_ids: set[str] = set()
+
+        for index, row in enumerate(rows):
+            location = f"services[{index}]"
             if not isinstance(row, dict):
-                continue
-            service_id = str(row.get("id") or "").strip()
-            title = str(row.get("title") or service_id).strip()
-            provider = str(row.get("provider") or "").strip().lower()
-            target = str(row.get("target") or row.get("name") or row.get("url") or "").strip()
-            if not service_id or not title or not provider or not target:
-                continue
-            reserved = {"id", "title", "provider", "target", "name", "url", "pinned", "priority", "group", "metric"}
-            options = {key: value for key, value in row.items() if key not in reserved}
+                raise ServiceConfigError(f"{location} must be a mapping")
+
+            service_id = _required_string(row, "id", location)
+            provider = _required_string(row, "provider", location).lower()
+            target = _service_target(row, location)
+
+            title = _optional_string(
+                row,
+                "title",
+                location,
+                default=service_id,
+                allow_empty=False,
+            )
+            group = _optional_string(
+                row,
+                "group",
+                location,
+                default="core",
+                allow_empty=False,
+            )
+            metric = _optional_string(
+                row,
+                "metric",
+                location,
+                default="status",
+                allow_empty=False,
+            )
+
+            pinned = row.get("pinned", True)
+            if not isinstance(pinned, bool):
+                raise ServiceConfigError(
+                    f"{location}.pinned must be a boolean"
+                )
+
+            priority = row.get("priority", 100)
+            if isinstance(priority, bool) or not isinstance(priority, int):
+                raise ServiceConfigError(
+                    f"{location}.priority must be an integer"
+                )
+
+            if service_id in seen_ids:
+                raise ServiceConfigError(
+                    f"{location}.id duplicates service id {service_id!r}"
+                )
+            seen_ids.add(service_id)
+
+            reserved = {
+                "id",
+                "title",
+                "provider",
+                "target",
+                "name",
+                "url",
+                "pinned",
+                "priority",
+                "group",
+                "metric",
+            }
+            options = {
+                key: value
+                for key, value in row.items()
+                if key not in reserved
+            }
+            _validate_provider_config(
+                provider=provider,
+                target=target,
+                metric=metric.lower(),
+                options=options,
+                location=location,
+            )
+
             definitions.append(
                 ServiceDefinition(
                     id=service_id,
                     title=title,
                     provider=provider,
                     target=target,
-                    pinned=bool(row.get("pinned", True)),
-                    priority=int(row.get("priority", 100)),
-                    group=str(row.get("group", "core")),
-                    metric=str(row.get("metric", "status")),
+                    pinned=pinned,
+                    priority=priority,
+                    group=group,
+                    metric=metric.lower(),
                     options=options,
                 )
             )
+
         return tuple(definitions)
+
+
+def _required_string(
+    row: Mapping[str, Any],
+    key: str,
+    location: str,
+) -> str:
+    value = row.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ServiceConfigError(
+            f"{location}.{key} must be a non-empty string"
+        )
+    return value.strip()
+
+
+def _optional_string(
+    row: Mapping[str, Any],
+    key: str,
+    location: str,
+    *,
+    default: str,
+    allow_empty: bool,
+) -> str:
+    if key not in row:
+        return default
+    value = row[key]
+    if not isinstance(value, str):
+        raise ServiceConfigError(f"{location}.{key} must be a string")
+    value = value.strip()
+    if not value and not allow_empty:
+        raise ServiceConfigError(
+            f"{location}.{key} must be a non-empty string"
+        )
+    return value
+
+
+def _service_target(
+    row: Mapping[str, Any],
+    location: str,
+) -> str:
+    present = [
+        key
+        for key in ("target", "name", "url")
+        if key in row and row[key] is not None
+    ]
+    if not present:
+        raise ServiceConfigError(
+            f"{location}.target must be a non-empty string"
+        )
+
+    selected = present[0]
+    value = row[selected]
+    if not isinstance(value, str) or not value.strip():
+        raise ServiceConfigError(
+            f"{location}.{selected} must be a non-empty string"
+        )
+    return value.strip()
+
+
+def _validate_provider_config(
+    *,
+    provider: str,
+    target: str,
+    metric: str,
+    options: Mapping[str, Any],
+    location: str,
+) -> None:
+    if provider not in SUPPORTED_SERVICE_PROVIDERS:
+        supported = ", ".join(sorted(SUPPORTED_SERVICE_PROVIDERS))
+        raise ServiceConfigError(
+            f"{location}.provider must be one of: {supported}"
+        )
+
+    if provider == "container":
+        if metric not in CONTAINER_METRICS:
+            allowed = ", ".join(sorted(CONTAINER_METRICS))
+            raise ServiceConfigError(
+                f"{location}.metric for container must be one of: {allowed}"
+            )
+        _reject_unknown_options(options, set(), location, provider)
+        return
+
+    if metric != "status":
+        raise ServiceConfigError(
+            f"{location}.metric for {provider} must be 'status'"
+        )
+
+    if provider == "systemd":
+        _reject_unknown_options(options, set(), location, provider)
+        return
+
+    if provider == "http":
+        _validate_http_target(target, location)
+        _reject_unknown_options(options, {"timeout", "expect"}, location, provider)
+        if "timeout" in options:
+            _positive_timeout(options["timeout"], location)
+        if "expect" in options:
+            expect = options["expect"]
+            if isinstance(expect, bool) or not isinstance(expect, int):
+                raise ServiceConfigError(
+                    f"{location}.expect must be an integer HTTP status code"
+                )
+            if not 100 <= expect <= 599:
+                raise ServiceConfigError(
+                    f"{location}.expect must be between 100 and 599"
+                )
+        return
+
+    if provider == "tcp":
+        _validate_tcp_target(target, location)
+        _reject_unknown_options(options, {"timeout"}, location, provider)
+        if "timeout" in options:
+            _positive_timeout(options["timeout"], location)
+
+
+def _reject_unknown_options(
+    options: Mapping[str, Any],
+    allowed: set[str],
+    location: str,
+    provider: str,
+) -> None:
+    unknown = sorted(set(options) - allowed)
+    if unknown:
+        joined = ", ".join(unknown)
+        raise ServiceConfigError(
+            f"{location} has unsupported option(s) for {provider}: {joined}"
+        )
+
+
+def _positive_timeout(value: Any, location: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ServiceConfigError(
+            f"{location}.timeout must be a positive number"
+        )
+    timeout = float(value)
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ServiceConfigError(
+            f"{location}.timeout must be a positive number"
+        )
+    return timeout
+
+
+def _validate_http_target(target: str, location: str) -> None:
+    parsed = urlsplit(target)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ServiceConfigError(
+            f"{location}.target for http must be an http:// or https:// URL"
+        )
+
+
+def _validate_tcp_target(target: str, location: str) -> None:
+    try:
+        host, port = _split_host_port(target)
+    except (TypeError, ValueError):
+        raise ServiceConfigError(
+            f"{location}.target for tcp must use host:port"
+        ) from None
+    if not host.strip() or not 1 <= port <= 65535:
+        raise ServiceConfigError(
+            f"{location}.target for tcp must use host:port with port 1-65535"
+        )
 
 
 class ServicesManager:
@@ -297,8 +578,26 @@ class ServicesManager:
         self.registry = registry
         self.providers = dict(providers)
         self.max_visible = max_visible
+        self._collect_task: asyncio.Task[ServicesSnapshot] | None = None
 
     async def collect(self) -> ServicesSnapshot:
+        # A Textual exclusive worker may cancel its caller while synchronous
+        # HTTP/TCP checks are still executing in asyncio.to_thread(). Keep one
+        # manager-level collection alive and let the next refresh reuse it
+        # rather than launching duplicate checks.
+        task = self._collect_task
+        if task is None or task.done():
+            task = asyncio.create_task(self._collect_once())
+            self._collect_task = task
+            task.add_done_callback(self._clear_collect_task)
+
+        return await asyncio.shield(task)
+
+    def _clear_collect_task(self, task: asyncio.Task[ServicesSnapshot]) -> None:
+        if self._collect_task is task:
+            self._collect_task = None
+
+    async def _collect_once(self) -> ServicesSnapshot:
         collected_at = datetime.now(timezone.utc)
         try:
             definitions = self.registry.load()

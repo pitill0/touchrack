@@ -14,3 +14,7 @@ services.yaml
 *~
 *.swp
 .DS_Store
+
+# Local verification / audit artifacts
+.verify-*.service
+*.audit.txt

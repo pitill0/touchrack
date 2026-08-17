@@ -5,13 +5,17 @@ flowchart LR
     TOUCH["Touchscreen<br/>evdev"] --> TR["TouchReader"]
     TR --> APP
 
-    APP --> UI["Screens<br/>Host · Services · Containers · Diagnostics"]
+    APP --> UI["Screens<br/>Host · Services · Storage · Containers · Diagnostics"]
 
     APP --> HOST["HostProvider"]
+    APP --> STORE["StorageProvider"]
+    APP --> SMART["DiskHealthProvider"]
     APP --> CONT["ContainersProvider"]
     APP --> SM["ServicesManager"]
 
     HOST --> LINUX["Linux / psutil"]
+    STORE --> LINUX
+    SMART --> SCT["smartctl (optional)"]
     CONT --> ENGINE["Podman / Docker"]
 
     SM --> CP["container"]

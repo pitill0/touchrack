@@ -30,6 +30,7 @@ class SmartctlDiskHealthProvider:
         self.devices = tuple(devices) if devices is not None else None
         self._cached: DiskHealthSnapshot | None = None
         self._cached_at = 0.0
+        self._inflight: asyncio.Task[DiskHealthSnapshot] | None = None
 
     async def collect(self) -> DiskHealthSnapshot:
         now = monotonic()
@@ -40,9 +41,25 @@ class SmartctlDiskHealthProvider:
         ):
             return self._cached
 
+        # Textual's exclusive refresh workers are cancelled when a newer refresh
+        # starts. asyncio.to_thread() cannot stop work already running in its
+        # thread, so a cancelled caller must not start a second SMART probe.
+        # Keep one provider-owned task alive and let later callers join it.
+        task = self._inflight
+        if task is None or task.done():
+            task = asyncio.create_task(self._refresh_cache())
+            self._inflight = task
+
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done() and self._inflight is task:
+                self._inflight = None
+
+    async def _refresh_cache(self) -> DiskHealthSnapshot:
         snapshot = await asyncio.to_thread(self._collect_sync)
         self._cached = snapshot
-        self._cached_at = now
+        self._cached_at = monotonic()
         return snapshot
 
     def _collect_sync(self) -> DiskHealthSnapshot:

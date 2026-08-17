@@ -49,9 +49,25 @@ class LocalStorageProvider:
         self.mountpoints = (
             tuple(mountpoints) if mountpoints is not None else None
         )
+        self._collect_task: asyncio.Task[StorageSnapshot] | None = None
 
     async def collect(self) -> StorageSnapshot:
+        # Cancellation of asyncio.to_thread() does not stop the worker thread.
+        # Keep one filesystem collection in flight so a replacement Textual
+        # refresh cannot overlap psutil mount / disk-usage probes.
+        task = self._collect_task
+        if task is None or task.done():
+            task = asyncio.create_task(self._collect_once())
+            self._collect_task = task
+            task.add_done_callback(self._clear_collect_task)
+        return await asyncio.shield(task)
+
+    async def _collect_once(self) -> StorageSnapshot:
         return await asyncio.to_thread(self._collect_sync)
+
+    def _clear_collect_task(self, task: asyncio.Task[StorageSnapshot]) -> None:
+        if self._collect_task is task:
+            self._collect_task = None
 
     def _collect_sync(self) -> StorageSnapshot:
         collected_at = datetime.now(timezone.utc)
