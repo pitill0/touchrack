@@ -265,7 +265,7 @@ async def test_storage_disks_mode_renders_health_and_opens_current_disk() -> Non
 
         assert view.mode == "disks"
         assert str(app.query_one("#storage-mode-files").label) == "FILES"
-        assert str(app.query_one("#storage-mode-disks").label) == "[ DISKS ]"
+        assert str(app.query_one("#storage-mode-disks").label) == "DISKS"
         assert app.query_one("#storage-grid").has_class("hidden")
         assert not app.query_one("#storage-disks-grid").has_class("hidden")
         first_label = str(app.query_one("#storage-disk-open-0").label)
@@ -365,7 +365,7 @@ async def test_disk_detail_renders_smart_nvme_information() -> None:
 
 
 @pytest.mark.asyncio
-async def test_storage_subnav_is_centered_and_touchable_at_64x18() -> None:
+async def test_storage_subnav_lives_in_header_and_is_touchable_at_64x18() -> None:
     app = StorageViewApp()
     async with app.run_test(size=(64, 18)) as pilot:
         await pilot.pause()
@@ -384,26 +384,37 @@ async def test_storage_subnav_is_centered_and_touchable_at_64x18() -> None:
         )
         await pilot.pause()
 
+        header = app.query_one("#storage-header")
         files = app.query_one("#storage-mode-files")
         disks = app.query_one("#storage-mode-disks")
+        health = app.query_one("#storage-health")
+        refresh = app.query_one("#refresh-interval-storage")
+        sleep = app.query_one("#screen-blank-storage")
 
-        assert str(files.label) == "[ FILES ]"
+        assert str(files.label) == "FILES"
         assert str(disks.label) == "DISKS"
-        assert files.region.height == 2
-        assert disks.region.height == 2
-        assert app.screen.region.contains_region(files.region)
-        assert app.screen.region.contains_region(disks.region)
+        assert files.region.height == 3
+        assert disks.region.height == 3
+        assert files.region.width == 9
+        assert disks.region.width == 9
+        assert app.query_one("#storage-title").region.width == 8
+        assert health.region.width == 7
+        assert files.parent is header
+        assert disks.parent is header
 
-        # Two equal flexible spacer/status zones keep the selector pair centered.
-        selector = app.query_one("#storage-mode-selector")
-        pair_center = (files.region.x + disks.region.right) / 2
-        selector_center = selector.region.x + selector.region.width / 2
-        assert abs(pair_center - selector_center) <= 1
+        for widget in (files, disks, health, refresh, sleep):
+            assert header.region.contains_region(widget.region)
+            assert app.screen.region.contains_region(widget.region)
+
+        assert files.region.right <= disks.region.x
+        assert disks.region.right <= health.region.x
+        assert health.region.right <= refresh.region.x
+        assert refresh.region.right <= sleep.region.x
 
         await pilot.click("#storage-mode-disks")
         await pilot.pause()
         assert str(files.label) == "FILES"
-        assert str(disks.label) == "[ DISKS ]"
+        assert str(disks.label) == "DISKS"
 
 
 
@@ -451,3 +462,32 @@ async def test_storage_disk_row_falls_back_to_compact_size_without_wear() -> Non
         assert app.screen.region.contains_region(
             app.query_one("#storage-disk-open-0").region
         )
+
+
+
+@pytest.mark.asyncio
+async def test_storage_snapshot_ignores_updates_after_child_dom_teardown() -> None:
+    app = StorageViewApp()
+    async with app.run_test(size=(64, 18)) as pilot:
+        await pilot.pause()
+        view = app.query_one(StorageView)
+
+        await view.remove_children()
+
+        storage_snapshot = StorageSnapshot(
+            filesystems=(_filesystem("/", usage_percent=30),),
+            collected_at=datetime.now(timezone.utc),
+        )
+        disk_snapshot = DiskHealthSnapshot(
+            disks=(_disk(),),
+            collected_at=datetime.now(timezone.utc),
+            available=True,
+        )
+
+        # Worker completion during teardown must preserve data without trying
+        # to render child widgets that Textual has already removed.
+        view.show_snapshot(storage_snapshot)
+        view.show_disk_snapshot(disk_snapshot)
+
+        assert view.snapshot is storage_snapshot
+        assert view.disk_snapshot is disk_snapshot

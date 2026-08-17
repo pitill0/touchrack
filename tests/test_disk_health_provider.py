@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -190,3 +192,41 @@ async def test_smartctl_provider_explicit_empty_selection_returns_no_disks(
 
     assert snapshot.available is True
     assert snapshot.disks == ()
+
+
+@pytest.mark.asyncio
+async def test_smartctl_provider_reuses_inflight_probe_after_caller_cancellation(
+    monkeypatch,
+) -> None:
+    provider = SmartctlDiskHealthProvider(cache_seconds=0)
+    started = threading.Event()
+    release = threading.Event()
+    scan_calls = 0
+    scan = {"devices": []}
+
+    def slow_run(*args: str):
+        nonlocal scan_calls
+        if "--scan-open" in args:
+            scan_calls += 1
+            started.set()
+            assert release.wait(timeout=2.0)
+        return _result(scan)
+
+    monkeypatch.setattr(provider, "_run", slow_run)
+
+    first = asyncio.create_task(provider.collect())
+    assert await asyncio.to_thread(started.wait, 1.0)
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    second = asyncio.create_task(provider.collect())
+    await asyncio.sleep(0.05)
+    assert scan_calls == 1
+
+    release.set()
+    snapshot = await second
+
+    assert snapshot.available is True
+    assert scan_calls == 1

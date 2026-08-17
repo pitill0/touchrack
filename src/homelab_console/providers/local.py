@@ -16,9 +16,26 @@ class LocalHostProvider:
 
     def __init__(self, disk_path: str = "/") -> None:
         self.disk_path = disk_path
+        self._collect_task: asyncio.Task[HostSnapshot] | None = None
 
     async def collect(self) -> HostSnapshot:
+        # Textual may cancel an exclusive refresh worker while _collect_sync()
+        # is already running in a thread. Keep one provider-level collection
+        # alive so the next refresh reuses it instead of starting another
+        # psutil / filesystem probe in parallel.
+        task = self._collect_task
+        if task is None or task.done():
+            task = asyncio.create_task(self._collect_once())
+            self._collect_task = task
+            task.add_done_callback(self._clear_collect_task)
+        return await asyncio.shield(task)
+
+    async def _collect_once(self) -> HostSnapshot:
         return await asyncio.to_thread(self._collect_sync)
+
+    def _clear_collect_task(self, task: asyncio.Task[HostSnapshot]) -> None:
+        if self._collect_task is task:
+            self._collect_task = None
 
     def _collect_sync(self) -> HostSnapshot:
         collected_at = datetime.now(timezone.utc)

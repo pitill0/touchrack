@@ -177,15 +177,15 @@ class ServicesView(Vertical):
         self._render_page()
 
         status = self.query_one("#services-status", Static)
-        status.remove_class("has-error", "has-warning")
+        status.remove_class("has-error", "has-warning", "has-config-error")
         health = self.query_one("#services-health", Static)
-        health.remove_class("healthy", "degraded", "unavailable")
+        health.remove_class("healthy", "degraded", "unavailable", "config-error")
 
         if snapshot.error:
-            status.update(snapshot.error)
-            status.add_class("has-error")
-            health.update("● DOWN")
-            health.add_class("unavailable")
+            status.update(f"CONFIG · {snapshot.error}")
+            status.add_class("has-config-error")
+            health.update("● CFG")
+            health.add_class("config-error")
         elif not snapshot.services:
             path = snapshot.config_path or "services.yaml"
             status.update(f"No services configured · {path}")

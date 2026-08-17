@@ -189,3 +189,58 @@ async def test_service_detail_renders_provider_specific_rows() -> None:
         assert "CHECKED" in joined
         back_button = app.screen.query_one("#service-detail-back")
         assert app.screen.region.contains_region(back_button.region)
+
+
+
+@pytest.mark.asyncio
+async def test_services_config_error_is_distinct_from_service_outage() -> None:
+    app = ServicesViewApp()
+    async with app.run_test(size=(64, 18)) as pilot:
+        await pilot.pause()
+        view = app.query_one(ServicesView)
+        view.show_snapshot(
+            ServicesSnapshot(
+                services=(),
+                collected_at=datetime.now(timezone.utc),
+                config_path="/etc/touchrack/services.yaml",
+                error="services[0].pinned must be a boolean",
+            )
+        )
+        await pilot.pause()
+
+        status = app.query_one("#services-status")
+        health = app.query_one("#services-health")
+
+        assert str(status.content) == (
+            "CONFIG · services[0].pinned must be a boolean"
+        )
+        assert status.has_class("has-config-error")
+        assert not status.has_class("has-error")
+        assert str(health.content) == "● CFG"
+        assert health.has_class("config-error")
+        assert not health.has_class("unavailable")
+
+
+@pytest.mark.asyncio
+async def test_service_error_remains_health_outage_not_config_error() -> None:
+    app = ServicesViewApp()
+    async with app.run_test(size=(64, 18)) as pilot:
+        await pilot.pause()
+        view = app.query_one(ServicesView)
+        view.show_snapshot(
+            ServicesSnapshot(
+                services=(_state(status="ERROR"),),
+                collected_at=datetime.now(timezone.utc),
+            )
+        )
+        await pilot.pause()
+
+        status = app.query_one("#services-status")
+        health = app.query_one("#services-health")
+
+        assert str(status.content) == "1 visible · 1 error"
+        assert status.has_class("has-error")
+        assert not status.has_class("has-config-error")
+        assert str(health.content) == "● DOWN"
+        assert health.has_class("unavailable")
+        assert not health.has_class("config-error")

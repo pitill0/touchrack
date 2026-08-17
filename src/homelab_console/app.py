@@ -8,11 +8,24 @@ import threading
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
-from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Button, Label, Static
+from textual.widgets import Button, Static
 
+from homelab_console.button_actions import (
+    ButtonActionKind,
+    classify_button_action,
+)
 from homelab_console.config import load_config
+from homelab_console.refresh_policy import (
+    next_refresh_interval,
+    normalize_refresh_interval,
+    refresh_interval_label,
+)
+from homelab_console.runtime_diagnostics import (
+    RuntimeDiagnostics,
+    TouchDiagnostic,
+    build_diagnostics_rows,
+)
 from homelab_console.providers import (
     AutoContainersProvider,
     ContainersProvider,
@@ -24,6 +37,7 @@ from homelab_console.providers import (
     StorageProvider,
 )
 from homelab_console.screens import ContainersView, HostView, ServicesView, StorageView
+from homelab_console.screens.system import ConsoleMenu
 from homelab_console.screens.containers import ContainerDetailScreen
 from homelab_console.screens.services import ServiceDetailScreen
 from homelab_console.screens.storage import DiskDetailScreen, StorageDetailScreen
@@ -46,65 +60,6 @@ from homelab_console.screen_blank import (
 from homelab_console.touch import TouchReader, TouchTap, map_axis, touch_enabled_from_environment
 from homelab_console import __version__
 from homelab_console.single_instance import AlreadyRunningError, SingleInstanceLock
-
-
-class DiagnosticsScreen(ModalScreen[None]):
-    """Read-only runtime diagnostics for the physical console."""
-
-    def compose(self) -> ComposeResult:
-        app = self.app
-        assert isinstance(app, HomelabConsole)
-        rows = app.diagnostics_rows()
-        with Vertical(id="diagnostics-dialog"):
-            with Horizontal(id="diagnostics-header"):
-                yield Button("BACK", id="diagnostics-back", classes="detail-back")
-                yield Label("SYSTEM DIAGNOSTICS", id="diagnostics-title")
-            for label, value, state in rows:
-                with Horizontal(classes=f"diagnostics-row {state}"):
-                    yield Static(label, classes="diagnostics-label")
-                    yield Static(value, classes="diagnostics-value")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "diagnostics-back":
-            self.dismiss()
-
-
-class ConsoleMenu(ModalScreen[None]):
-    """Compact touch-friendly application menu."""
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="menu-dialog"):
-            yield Label("CONSOLE MENU", id="menu-title")
-            yield Static(
-                f"Local-first homelab console\nHost + services + containers · v{__version__}",
-                id="menu-about",
-            )
-            yield Button("REFRESH HOST", id="menu-refresh", classes="menu-action")
-            yield Button("DIAGNOSTICS", id="menu-diagnostics", classes="menu-action")
-            yield Button("ABOUT", id="menu-about-toggle", classes="menu-action")
-            yield Button("QUIT", id="menu-quit", classes="menu-action menu-danger")
-            yield Button("CLOSE", id="menu-close", classes="menu-action")
-
-    def on_mount(self) -> None:
-        self.query_one("#menu-about", Static).display = False
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        button_id = event.button.id
-        if button_id == "menu-refresh":
-            app = self.app
-            if isinstance(app, HomelabConsole):
-                app.refresh_host()
-            self.dismiss()
-        elif button_id == "menu-diagnostics":
-            self.dismiss()
-            self.app.push_screen(DiagnosticsScreen())
-        elif button_id == "menu-about-toggle":
-            about = self.query_one("#menu-about", Static)
-            about.display = not about.display
-        elif button_id == "menu-quit":
-            self.app.exit()
-        elif button_id == "menu-close":
-            self.dismiss()
 
 
 class HomelabConsole(App[None]):
@@ -134,8 +89,7 @@ class HomelabConsole(App[None]):
         self.disk_health_provider = (
             disk_health_provider or SmartctlDiskHealthProvider()
         )
-        self.refresh_options = (5.0, 30.0, 60.0)
-        self.refresh_seconds = self._normalize_refresh_interval(refresh_seconds)
+        self.refresh_seconds = normalize_refresh_interval(refresh_seconds)
         # Kept for compatibility with the earlier spike API; refresh is now global.
         _ = containers_refresh_seconds
         self._last_scheduled_refresh = monotonic()
@@ -297,25 +251,13 @@ class HomelabConsole(App[None]):
             widget.press()
 
     def _widget_at(self, x: int, y: int) -> Widget | None:
-        # Prefer actionable controls, then the smallest visible widget region.
-        matches: list[Widget] = []
-        for widget in self.screen.query("*"):
-            if not isinstance(widget, Widget):
-                continue
-            region = widget.region
-            if region.width <= 0 or region.height <= 0:
-                continue
-            if region.x <= x < region.x + region.width and region.y <= y < region.y + region.height:
-                matches.append(widget)
-        if not matches:
-            return None
-        matches.sort(
-            key=lambda widget: (
-                0 if isinstance(widget, Button) else 1,
-                widget.region.width * widget.region.height,
-            )
-        )
-        return matches[0]
+        """Return the actionable widget Textual actually renders at a cell.
+
+        Physical touch events arrive from evdev rather than Textual's mouse
+        input path. Delegate hit-testing to Screen's compositor-aware lookup so
+        scrolled, clipped, hidden, or covered widgets cannot steal a tap.
+        """
+        return self.screen.get_focusable_widget_at(x, y)
 
     @staticmethod
     def _widget_identity(widget: Widget | None) -> str:
@@ -325,64 +267,74 @@ class HomelabConsole(App[None]):
         return f"{name}#{widget.id}" if widget.id else name
 
     def _update_snapshot_ages(self) -> None:
-        """Update freshness labels without triggering data collection."""
-        self.query_one(ContainersView).update_snapshot_age()
-        self.query_one(ServicesView).update_snapshot_age()
+        """Update mounted freshness labels without triggering data collection.
+
+        Timers may tick while Textual is tearing down the screen. Treat these
+        presentation-only updates as best-effort so an already-unmounted view
+        cannot turn normal shutdown into an application exception.
+        """
+        for view in self.query(ContainersView):
+            view.update_snapshot_age()
+        for view in self.query(ServicesView):
+            view.update_snapshot_age()
 
     def diagnostics_rows(self) -> tuple[tuple[str, str, str], ...]:
         """Return cheap, read-only runtime facts without probing hardware again."""
-        touch_state = "DISABLED"
-        touch_detail = "disabled"
-        touch_class = "muted"
+        touch = TouchDiagnostic("DISABLED", "disabled", "muted")
         if self.touch_enabled and touch_enabled_from_environment():
-            if self.touch_reader is not None and self.touch_reader._thread is not None and self.touch_reader._thread.is_alive():
+            reader_alive = (
+                self.touch_reader is not None
+                and self.touch_reader._thread is not None
+                and self.touch_reader._thread.is_alive()
+            )
+            if reader_alive:
                 device = Path(self.touch_reader.device_path or "?").name
-                touch_state = "OK"
-                touch_detail = f"{device} · {self.touch_reader.device_name or 'touch'}"
-                touch_class = "ok"
+                touch = TouchDiagnostic(
+                    "OK",
+                    f"{device} · {self.touch_reader.device_name or 'touch'}",
+                    "ok",
+                )
             else:
-                touch_state = "WARN"
-                touch_detail = self.touch_reader.error if self.touch_reader is not None else "reader unavailable"
-                touch_class = "warn"
+                detail = (
+                    self.touch_reader.error
+                    if self.touch_reader is not None
+                    else "reader unavailable"
+                )
+                touch = TouchDiagnostic("WARN", detail, "warn")
 
         containers = self.query_one(ContainersView).snapshot
-        if containers is None:
-            engine_value, engine_class = "WAITING", "muted"
-        elif containers.error:
-            engine_value, engine_class = f"{containers.engine} · ERROR", "error"
-        else:
-            engine_value, engine_class = f"{containers.engine} · {containers.total} containers", "ok"
-
         services = self.query_one(ServicesView).snapshot
-        if services is None:
-            services_value, services_class = "WAITING", "muted"
-        elif services.error:
-            services_value, services_class = "ERROR", "error"
-        else:
-            services_value, services_class = f"{len(services.services)} visible", "ok" if services.services else "warn"
 
-        config_path = Path(self.config_source_path).expanduser() if self.config_source_path else None
-        if config_path is not None and config_path.exists():
-            config_value, config_class = config_path.name, "ok"
-        else:
-            config_value, config_class = "defaults", "muted"
-
-        blank = screen_blank_label(self.screen_blank_minutes, compact=True)
-        blank_value = f"{blank} · {'OK' if not self.screen_blank_error else 'ERROR'}"
-        blank_class = "ok" if not self.screen_blank_error else "error"
-
-        return (
-            ("VERSION", __version__, "ok"),
-            ("DISPLAY", f"{Path(self.screen_tty).name} · {self.size.width}×{self.size.height}", "ok"),
-            ("TOUCH", f"{touch_state} · {touch_detail}", touch_class),
-            ("ENGINE", engine_value, engine_class),
-            ("SERVICES", services_value, services_class),
-            ("CONFIG", config_value, config_class),
-            ("SLEEP", blank_value, blank_class),
+        return build_diagnostics_rows(
+            RuntimeDiagnostics(
+                version=__version__,
+                screen_tty=self.screen_tty,
+                width=self.size.width,
+                height=self.size.height,
+                touch=touch,
+                container_engine=(
+                    containers.engine if containers is not None else None
+                ),
+                container_total=(
+                    containers.total if containers is not None else None
+                ),
+                containers_error=(
+                    containers.error if containers is not None else None
+                ),
+                services_count=(
+                    len(services.services) if services is not None else None
+                ),
+                services_error=(
+                    services.error if services is not None else None
+                ),
+                config_source_path=self.config_source_path,
+                sleep_label=screen_blank_label(
+                    self.screen_blank_minutes,
+                    compact=True,
+                ),
+                screen_blank_error=self.screen_blank_error,
+            )
         )
-
-    def _normalize_refresh_interval(self, value: float) -> float:
-        return min(self.refresh_options, key=lambda option: abs(option - value))
 
     def _refresh_scheduler_tick(self) -> None:
         now = monotonic()
@@ -398,8 +350,7 @@ class HomelabConsole(App[None]):
         self._update_display_blank_state(monotonic())
 
     def cycle_refresh_interval(self) -> None:
-        current_index = self.refresh_options.index(self.refresh_seconds)
-        self.refresh_seconds = self.refresh_options[(current_index + 1) % len(self.refresh_options)]
+        self.refresh_seconds = next_refresh_interval(self.refresh_seconds)
         self._last_scheduled_refresh = monotonic()
         self._update_refresh_controls()
         # Apply the new selection immediately, then start counting the new interval.
@@ -408,7 +359,10 @@ class HomelabConsole(App[None]):
         self.refresh_storage()
 
     def _update_refresh_controls(self) -> None:
-        label = f"REF {int(self.refresh_seconds)}s" if self.screen.has_class("compact-touch") else f"REFRESH {int(self.refresh_seconds)}s"
+        label = refresh_interval_label(
+            self.refresh_seconds,
+            compact=self.screen.has_class("compact-touch"),
+        )
         for button in self.query(".refresh-interval-button"):
             if isinstance(button, Button):
                 button.label = label
@@ -514,65 +468,70 @@ class HomelabConsole(App[None]):
             return None
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        button_id = event.button.id
-        if button_id in {
-            "menu-button",
-            "menu-button-containers",
-            "menu-button-services",
-            "menu-button-storage",
-        }:
+        action = classify_button_action(event.button.id)
+        if action is None:
+            return
+
+        if action.kind is ButtonActionKind.MENU:
             self.push_screen(ConsoleMenu())
             return
-        if button_id in {
-            "refresh-interval-host",
-            "refresh-interval-containers",
-            "refresh-interval-services",
-            "refresh-interval-storage",
-        }:
+
+        if action.kind is ButtonActionKind.REFRESH_INTERVAL:
             self.cycle_refresh_interval()
             return
-        if button_id in {
-            "screen-blank-host",
-            "screen-blank-containers",
-            "screen-blank-services",
-            "screen-blank-storage",
-        }:
+
+        if action.kind is ButtonActionKind.SCREEN_BLANK:
             self.cycle_screen_blank()
             return
-        if button_id == "containers-view-button":
+
+        if action.kind is ButtonActionKind.CONTAINERS_VIEW:
             self.query_one(ContainersView).toggle_view()
             return
-        if button_id and button_id.startswith("container-sort-"):
-            self.query_one(ContainersView).set_sort(
-                button_id.removeprefix("container-sort-")
-            )
+
+        if action.kind is ButtonActionKind.CONTAINERS_PAGE:
+            self.query_one(ContainersView).page_list(int(action.value))
             return
-        if button_id and button_id.startswith("container-open-"):
+
+        if action.kind is ButtonActionKind.CONTAINER_SORT:
+            self.query_one(ContainersView).set_sort(str(action.value))
+            return
+
+        if action.kind is ButtonActionKind.CONTAINER_OPEN:
             containers_view = self.query_one(ContainersView)
-            container = containers_view.container_for_button(button_id)
+            container = containers_view.container_for_button(str(action.value))
             if container is not None:
-                engine = containers_view.snapshot.engine if containers_view.snapshot else "Containers"
+                engine = (
+                    containers_view.snapshot.engine
+                    if containers_view.snapshot
+                    else "Containers"
+                )
                 self.push_screen(ContainerDetailScreen(container, engine))
             return
-        if button_id and button_id.startswith("service-open-"):
-            state = self.query_one(ServicesView).state_for_button(button_id)
+
+        if action.kind is ButtonActionKind.SERVICE_OPEN:
+            state = self.query_one(ServicesView).state_for_button(
+                str(action.value)
+            )
             if state is not None:
                 self.push_screen(ServiceDetailScreen(state))
             return
-        if button_id and button_id.startswith("storage-open-"):
-            filesystem = self.query_one(StorageView).filesystem_for_button(button_id)
+
+        if action.kind is ButtonActionKind.STORAGE_OPEN:
+            filesystem = self.query_one(StorageView).filesystem_for_button(
+                str(action.value)
+            )
             if filesystem is not None:
                 self.push_screen(StorageDetailScreen(filesystem))
             return
-        if button_id and button_id.startswith("storage-disk-open-"):
-            disk = self.query_one(StorageView).disk_for_button(button_id)
+
+        if action.kind is ButtonActionKind.STORAGE_DISK_OPEN:
+            disk = self.query_one(StorageView).disk_for_button(str(action.value))
             if disk is not None:
                 self.push_screen(DiskDetailScreen(disk))
             return
-        if not button_id or not button_id.startswith("nav-"):
-            return
-        self.show_section(button_id.removeprefix("nav-"))
 
+        if action.kind is ButtonActionKind.NAVIGATION:
+            self.show_section(str(action.value))
     def show_section(self, section: str) -> None:
         if section not in {"host", "services", "storage", "containers"}:
             raise ValueError(f"Unknown section: {section}")

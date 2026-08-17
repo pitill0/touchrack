@@ -3,11 +3,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from textual.app import ComposeResult
-from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
+from textual.containers import Grid, Horizontal, Vertical
+from rich.text import Text
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label, Static
 
 from homelab_console.models import ContainerInfo, ContainersSnapshot
+
+
+VISIBLE_CONTAINER_ROWS = 4
 
 
 def _format_age(seconds: int) -> str:
@@ -219,11 +223,6 @@ class ContainersSummary(Vertical):
                 f"{self.snapshot.total}\nTOTAL",
                 classes="btop-total total",
             )
-            yield Button(
-                "LIST",
-                id="containers-view-button",
-                classes="btop-view-button",
-            )
 
         with Grid(id="btop-container-rankings"):
             yield BtopRanking("CPU HOTSPOTS", top_cpu, "cpu")
@@ -231,19 +230,34 @@ class ContainersSummary(Vertical):
             yield StoppedPanel(stopped)
 
 
-class ContainersCompactList(VerticalScroll):
-    """Touch-friendly compact list with sortable column headers."""
+class ContainersCompactList(Vertical):
+    """Touch-first compact container list with explicit paging controls.
+
+    The physical evdev bridge currently emits taps, not swipe / wheel gestures.
+    Mount only the current page so every list operation is reachable by touch
+    and off-page rows cannot participate in hit-testing.
+    """
 
     def __init__(
         self,
         containers: tuple[ContainerInfo, ...],
         sort_key: str,
         sort_descending: bool,
+        page: int,
     ) -> None:
         super().__init__(classes="containers-compact-list")
         self.containers = containers
         self.sort_key = sort_key
         self.sort_descending = sort_descending
+        self.page = page
+
+    @property
+    def page_count(self) -> int:
+        return max(
+            1,
+            (len(self.containers) + VISIBLE_CONTAINER_ROWS - 1)
+            // VISIBLE_CONTAINER_ROWS,
+        )
 
     def _header_label(self, title: str, key: str) -> str:
         if self.sort_key != key:
@@ -252,11 +266,6 @@ class ContainersCompactList(VerticalScroll):
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="compact-list-header"):
-            yield Button(
-                "BACK",
-                id="containers-view-button",
-                classes="compact-view-button",
-            )
             yield Button(
                 self._header_label("NAME", "name"),
                 id="container-sort-name",
@@ -273,12 +282,37 @@ class ContainersCompactList(VerticalScroll):
                 classes="compact-header-button metric",
             )
             yield Button(
-                self._header_label("MEMORY", "memory"),
+                self._header_label("MEM", "memory"),
                 id="container-sort-memory",
                 classes="compact-header-button metric",
             )
-        for index, container in enumerate(self.containers):
+
+        start = self.page * VISIBLE_CONTAINER_ROWS
+        end = start + VISIBLE_CONTAINER_ROWS
+        for index, container in enumerate(
+            self.containers[start:end],
+            start=start,
+        ):
             yield CompactContainerRow(container, index)
+
+        # Pager belongs to the list as a whole, not to a table column.
+        with Horizontal(classes="containers-page-footer"):
+            yield Button(
+                "▲",
+                id="containers-page-prev",
+                classes="containers-page-button",
+                disabled=self.page <= 0,
+            )
+            yield Static(
+                f"{self.page + 1}/{self.page_count}",
+                id="containers-page-indicator",
+            )
+            yield Button(
+                "▼",
+                id="containers-page-next",
+                classes="containers-page-button",
+                disabled=self.page >= self.page_count - 1,
+            )
 
 
 class ContainersView(Vertical):
@@ -290,12 +324,19 @@ class ContainersView(Vertical):
         self.snapshot: ContainersSnapshot | None = None
         self.sort_key = "state"
         self.sort_descending = False
+        self.list_page = 0
         self.displayed_containers: tuple[ContainerInfo, ...] = ()
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="containers-header"):
             yield Button("≡", id="menu-button-containers", classes="flat-control", tooltip="Open console menu")
             yield Label("CONTAINERS", id="containers-title")
+            yield Button(
+                Text("LIST"),
+                id="containers-view-button",
+                classes="containers-mode-button flat-control",
+                tooltip="Switch containers view",
+            )
             yield Static("● --", id="containers-health")
             yield Button("REF 5s", id="refresh-interval-containers", classes="refresh-interval-button flat-control")
             yield Button("SLEEP 1m", id="screen-blank-containers", classes="screen-blank-button flat-control")
@@ -311,6 +352,22 @@ class ContainersView(Vertical):
 
     def toggle_view(self) -> None:
         self.view_mode = "list" if self.view_mode == "summary" else "summary"
+        if self.view_mode == "list":
+            self.list_page = 0
+        self._render_body()
+
+    def page_list(self, delta: int) -> None:
+        if self.view_mode != "list" or self.snapshot is None:
+            return
+        page_count = max(
+            1,
+            (len(self._sorted_containers()) + VISIBLE_CONTAINER_ROWS - 1)
+            // VISIBLE_CONTAINER_ROWS,
+        )
+        next_page = min(max(0, self.list_page + delta), page_count - 1)
+        if next_page == self.list_page:
+            return
+        self.list_page = next_page
         self._render_body()
 
     def set_sort(self, key: str) -> None:
@@ -322,6 +379,7 @@ class ContainersView(Vertical):
             self.sort_key = key
             # Resource columns are most useful high-to-low on first touch.
             self.sort_descending = key in {"cpu", "memory"}
+        self.list_page = 0
         self._render_body()
 
     def _sorted_containers(self) -> tuple[ContainerInfo, ...]:
@@ -379,22 +437,38 @@ class ContainersView(Vertical):
             health.update("● OK")
             health.add_class("healthy")
 
+        if self.view_mode == "list":
+            page_count = max(
+                1,
+                (len(self._sorted_containers()) + VISIBLE_CONTAINER_ROWS - 1)
+                // VISIBLE_CONTAINER_ROWS,
+            )
+            self.list_page = min(self.list_page, page_count - 1)
         self._render_body()
 
 
     def update_snapshot_age(self) -> None:
+        labels = self.query("#containers-last-update")
         if self.snapshot is None:
-            self.query_one("#containers-last-update", Label).update("Waiting")
+            for label in labels:
+                label.update("Waiting")
             return
         age = max(
             0,
             int((datetime.now(timezone.utc) - self.snapshot.collected_at).total_seconds()),
         )
-        self.query_one("#containers-last-update", Label).update(_format_age(age))
+        for label in labels:
+            label.update(_format_age(age))
 
     def _render_body(self) -> None:
         body = self.query_one("#containers-body", Vertical)
         body.remove_children()
+
+        view_button = self.query_one("#containers-view-button", Button)
+        view_button.label = (
+            Text("BACK") if self.view_mode == "list" else Text("LIST")
+        )
+
         snapshot = self.snapshot
         if snapshot is None:
             body.mount(Static("Reading local containers…", classes="containers-empty"))
@@ -419,5 +493,6 @@ class ContainersView(Vertical):
                     self.displayed_containers,
                     self.sort_key,
                     self.sort_descending,
+                    self.list_page,
                 )
             )

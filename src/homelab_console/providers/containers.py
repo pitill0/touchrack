@@ -33,14 +33,30 @@ class CliContainersProvider:
                 process.communicate(), timeout=self.timeout_seconds
             )
         except asyncio.TimeoutError as exc:
-            process.kill()
-            await process.communicate()
-            raise TimeoutError(f"command exceeded {self.timeout_seconds:.0f}s") from exc
+            await _kill_and_reap(process)
+            raise TimeoutError(
+                f"command exceeded {self.timeout_seconds:.0f}s"
+            ) from exc
+        except asyncio.CancelledError:
+            # Textual's exclusive refresh workers cancel the previous coroutine.
+            # Cancellation of communicate() does not terminate the child process.
+            await _kill_and_reap(process)
+            raise
 
         if process.returncode != 0:
             message = stderr.decode(errors="replace").strip() or f"unknown {self.engine} error"
             raise RuntimeError(message)
         return stdout.decode(errors="replace").strip()
+
+
+
+async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:
+    """Terminate and reap a CLI child process, tolerating an already-exited child."""
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+    await process.communicate()
 
 
 class PodmanContainersProvider(CliContainersProvider):

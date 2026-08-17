@@ -267,6 +267,16 @@ class StorageView(Vertical):
         with Horizontal(id="storage-header"):
             yield Button("≡", id="menu-button-storage", classes="flat-control")
             yield Label("STORAGE", id="storage-title")
+            yield Button(
+                Text("FILES", no_wrap=True),
+                id="storage-mode-files",
+                classes="storage-mode-button selected flat-control",
+            )
+            yield Button(
+                Text("DISKS", no_wrap=True),
+                id="storage-mode-disks",
+                classes="storage-mode-button flat-control",
+            )
             yield Static("● --", id="storage-health")
             yield Button(
                 "REF 5s",
@@ -279,20 +289,6 @@ class StorageView(Vertical):
                 classes="screen-blank-button flat-control",
             )
 
-        with Horizontal(id="storage-mode-selector"):
-            yield Static("", classes="storage-mode-spacer")
-            yield Button(
-                Text("[ FILES ]"),
-                id="storage-mode-files",
-                classes="storage-mode-button selected flat-control",
-            )
-            yield Button(
-                "DISKS",
-                id="storage-mode-disks",
-                classes="storage-mode-button flat-control",
-            )
-            yield Static("", id="storage-status")
-
         with Grid(id="storage-grid"):
             for index in range(VISIBLE_FILESYSTEMS):
                 yield FilesystemCard(index)
@@ -300,6 +296,10 @@ class StorageView(Vertical):
         with Grid(id="storage-disks-grid", classes="hidden"):
             for index in range(VISIBLE_DISKS):
                 yield DiskHealthCard(index)
+
+        # Preserve detailed provider/configuration feedback without spending a
+        # dedicated sub-navigation row below the header.
+        yield Static("", id="storage-status")
 
         with Horizontal(id="storage-pager", classes="pager-hidden"):
             yield Button(
@@ -320,9 +320,41 @@ class StorageView(Vertical):
             status.update("Reading local filesystems…")
             status.remove_class("has-warning", "has-error")
 
+    def _render_dom_ready(self) -> bool:
+        """Return whether the mounted child DOM is still safe to update."""
+        if not self.is_mounted:
+            return False
+
+        required = [
+            "#storage-status",
+            "#storage-health",
+            "#storage-pager",
+            "#storage-page-indicator",
+            "#storage-page-prev",
+            "#storage-page-next",
+        ]
+        if self.mode == "files":
+            required.extend(
+                f"#storage-open-{index}"
+                for index in range(VISIBLE_FILESYSTEMS)
+            )
+        else:
+            required.extend(
+                f"#storage-disk-open-{index}"
+                for index in range(VISIBLE_DISKS)
+            )
+
+        return all(len(self.query(selector)) == 1 for selector in required)
+
     def show_snapshot(self, snapshot: StorageSnapshot) -> None:
         self.snapshot = snapshot
         self._all_filesystems = snapshot.filesystems
+
+        # A provider worker may complete while Textual is tearing down the
+        # screen. Preserve the fresh snapshot, but don't query children that
+        # are already disappearing from the DOM.
+        if not self._render_dom_ready():
+            return
 
         if self.mode == "files":
             if self._page >= self._page_count:
@@ -368,6 +400,9 @@ class StorageView(Vertical):
     def show_disk_snapshot(self, snapshot: DiskHealthSnapshot) -> None:
         self.disk_snapshot = snapshot
         self._all_disks = snapshot.disks
+
+        if not self._render_dom_ready():
+            return
 
         if self.mode == "disks":
             if self._page >= self._page_count:
@@ -418,8 +453,16 @@ class StorageView(Vertical):
         disks_selected = self.mode == "disks"
         files_button.set_class(files_selected, "selected")
         disks_button.set_class(disks_selected, "selected")
-        files_button.label = Text("[ FILES ]") if files_selected else Text("FILES")
-        disks_button.label = Text("[ DISKS ]") if disks_selected else Text("DISKS")
+        files_button.label = (
+            Text("FILES", no_wrap=True)
+            if files_selected
+            else Text("FILES", no_wrap=True)
+        )
+        disks_button.label = (
+            Text("DISKS", no_wrap=True)
+            if disks_selected
+            else Text("DISKS", no_wrap=True)
+        )
 
         status = self.query_one("#storage-status", Static)
         if self.mode == "disks" and self.disk_snapshot is not None:
