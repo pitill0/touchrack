@@ -11,7 +11,13 @@ reads the touchscreen directly through Linux `evdev`.
 
 > Current release: **v4.7.0**. Read-only by design.
 
-<!-- Add a real 64x18 photo/screenshot here before publishing the repository. -->
+<p align="center">
+  <img
+    src="docs/images/touchrack-showcase.png"
+    alt="TouchRack running on a physical 64x18 Linux TTY touchscreen"
+    width="100%"
+  />
+</p>
 
 ## What it shows
 
