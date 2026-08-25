@@ -36,6 +36,7 @@ from homelab_console.providers import (
     SmartctlDiskHealthProvider,
     StorageProvider,
 )
+from homelab_console.nodes import Node, NodeRegistry, NodeRuntime
 from homelab_console.screens import ContainersView, HostView, ServicesView, StorageView
 from homelab_console.screens.system import ConsoleMenu
 from homelab_console.screens.containers import ContainerDetailScreen
@@ -83,12 +84,15 @@ class HomelabConsole(App[None]):
         config_source_path: str | None = None,
     ) -> None:
         super().__init__()
-        self.provider = provider or LocalHostProvider()
-        self.containers_provider = containers_provider or AutoContainersProvider()
-        self.storage_provider = storage_provider or LocalStorageProvider()
-        self.disk_health_provider = (
-            disk_health_provider or SmartctlDiskHealthProvider()
+        local_runtime = NodeRuntime(
+            node=Node(id="local", title="Local"),
+            host=provider or LocalHostProvider(),
+            containers=containers_provider or AutoContainersProvider(),
+            storage=storage_provider or LocalStorageProvider(),
+            disk_health=disk_health_provider or SmartctlDiskHealthProvider(),
         )
+        self.nodes = NodeRegistry((local_runtime,), default_node_id="local")
+        self.active_node_id = "local"
         self.refresh_seconds = normalize_refresh_interval(refresh_seconds)
         # Kept for compatibility with the earlier spike API; refresh is now global.
         _ = containers_refresh_seconds
@@ -115,6 +119,29 @@ class HomelabConsole(App[None]):
         self._last_touch_activity = monotonic()
         self._discard_next_tap = False
         self._display_blanked = False
+
+    @property
+    def active_node(self) -> NodeRuntime:
+        """Return the runtime selected as the application's monitoring context."""
+        return self.nodes.get(self.active_node_id)
+
+    # Compatibility accessors preserve the v4.7 constructor/injection surface
+    # while keeping the active node runtime as the single source of truth.
+    @property
+    def provider(self) -> HostProvider:
+        return self.active_node.host
+
+    @property
+    def containers_provider(self) -> ContainersProvider:
+        return self.active_node.containers
+
+    @property
+    def storage_provider(self) -> StorageProvider:
+        return self.active_node.storage
+
+    @property
+    def disk_health_provider(self) -> DiskHealthProvider:
+        return self.active_node.disk_health
 
     def compose(self) -> ComposeResult:
         yield Static("TOUCH: waiting", id="touch-diagnostic")
@@ -434,14 +461,14 @@ class HomelabConsole(App[None]):
     async def refresh_host(self) -> None:
         host_view = self.query_one(HostView)
         host_view.show_refreshing()
-        snapshot = await self.provider.collect()
+        snapshot = await self.active_node.host.collect()
         host_view.show_snapshot(snapshot)
 
     @work(exclusive=True, group="containers-refresh")
     async def refresh_containers(self) -> None:
         containers_view = self.query_one(ContainersView)
         containers_view.show_refreshing()
-        snapshot = await self.containers_provider.collect()
+        snapshot = await self.active_node.containers.collect()
         containers_view.show_snapshot(snapshot)
         self.refresh_services()
 
@@ -449,8 +476,8 @@ class HomelabConsole(App[None]):
     async def refresh_storage(self) -> None:
         storage_view = self.query_one(StorageView)
         storage_view.show_refreshing()
-        snapshot = await self.storage_provider.collect()
-        disk_snapshot = await self.disk_health_provider.collect()
+        snapshot = await self.active_node.storage.collect()
+        disk_snapshot = await self.active_node.disk_health.collect()
         storage_view.show_snapshot(snapshot)
         storage_view.show_disk_snapshot(disk_snapshot)
 

@@ -12,6 +12,7 @@ def test_config_defaults(tmp_path: Path):
     assert cfg.touch.device == "auto"
     assert cfg.storage.mounts is None
     assert cfg.storage.disks is None
+    assert cfg.nodes is None
 
 
 def test_config_loads_runtime_options(tmp_path: Path):

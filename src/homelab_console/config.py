@@ -6,6 +6,13 @@ from pathlib import Path
 
 import yaml
 
+from homelab_console.nodes.config import (
+    ConfiguredNode,
+    LocalTransportConfig,
+    SshTransportConfig,
+)
+from homelab_console.nodes.models import Node
+
 
 @dataclass(frozen=True, slots=True)
 class DisplayConfig:
@@ -37,6 +44,8 @@ class AppConfig:
     refresh: RefreshConfig = RefreshConfig()
     touch: TouchConfig = TouchConfig()
     storage: StorageConfig = StorageConfig()
+    # None preserves the v4.7 implicit local-node behaviour.
+    nodes: tuple[ConfiguredNode, ...] | None = None
     services_file: str | None = None
     source_path: str | None = None
 
@@ -81,6 +90,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         require_absolute=True,
         section_name="storage",
     )
+    nodes = _parse_nodes(payload)
 
     services_file = services.get("file")
     if services_file is not None:
@@ -96,6 +106,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             mounts=storage_mounts,
             disks=storage_disks,
         ),
+        nodes=nodes,
         services_file=services_file,
         source_path=str(config_path),
     )
@@ -138,6 +149,209 @@ def _parse_bool(value: object) -> bool:
     if text in {"0", "false", "no", "off"}:
         return False
     raise ValueError("touch.enabled must be a boolean")
+
+
+def _parse_nodes(
+    payload: dict[object, object],
+) -> tuple[ConfiguredNode, ...] | None:
+    if "nodes" not in payload:
+        return None
+
+    raw_nodes = payload["nodes"]
+    if not isinstance(raw_nodes, list):
+        raise ValueError("nodes must be a list")
+    if not raw_nodes:
+        raise ValueError("nodes must contain at least one node")
+
+    configured: list[ConfiguredNode] = []
+    seen_ids: set[str] = set()
+    local_count = 0
+
+    for index, raw_node in enumerate(raw_nodes):
+        location = f"nodes[{index}]"
+        node_mapping = _require_mapping(raw_node, location)
+        _reject_unknown_keys(
+            node_mapping,
+            {"id", "title", "transport"},
+            location,
+        )
+
+        node_id = _required_string(node_mapping, "id", location)
+        title = _required_string(node_mapping, "title", location)
+        if node_id in seen_ids:
+            raise ValueError(f"duplicate node id: {node_id}")
+        seen_ids.add(node_id)
+
+        transport_mapping = _require_mapping(
+            node_mapping.get("transport"),
+            f"{location}.transport",
+        )
+        transport_type = _required_string(
+            transport_mapping,
+            "type",
+            f"{location}.transport",
+        )
+
+        if transport_type == "local":
+            _reject_unknown_keys(
+                transport_mapping,
+                {"type"},
+                f"{location}.transport",
+            )
+            transport = LocalTransportConfig()
+            local_count += 1
+            if local_count > 1:
+                raise ValueError("nodes may contain at most one local transport")
+        elif transport_type == "ssh":
+            transport = _parse_ssh_transport(transport_mapping, location)
+        else:
+            raise ValueError(
+                f"{location}.transport.type must be one of: local, ssh"
+            )
+
+        configured.append(
+            ConfiguredNode(
+                node=Node(id=node_id, title=title, transport=transport.type),
+                transport=transport,
+            )
+        )
+
+    return tuple(configured)
+
+
+def _parse_ssh_transport(
+    transport: dict[object, object],
+    node_location: str,
+) -> SshTransportConfig:
+    location = f"{node_location}.transport"
+    _reject_unknown_keys(
+        transport,
+        {
+            "type",
+            "host",
+            "user",
+            "port",
+            "identity_file",
+            "known_hosts_file",
+            "connect_timeout",
+            "command_timeout",
+        },
+        location,
+    )
+
+    host = _required_string(transport, "host", location)
+    user = _required_string(transport, "user", location)
+    if host.startswith("-") or any(character.isspace() for character in host):
+        raise ValueError(f"{location}.host is not a safe SSH host")
+    if (
+        user.startswith("-")
+        or "@" in user
+        or any(character.isspace() for character in user)
+    ):
+        raise ValueError(f"{location}.user is not a safe SSH user")
+
+    port = _bounded_integer(
+        transport.get("port", 22),
+        f"{location}.port",
+        minimum=1,
+        maximum=65535,
+    )
+    connect_timeout = _bounded_number(
+        transport.get("connect_timeout", 3),
+        f"{location}.connect_timeout",
+        minimum=0.1,
+        maximum=30.0,
+    )
+    command_timeout = _bounded_number(
+        transport.get("command_timeout", 5),
+        f"{location}.command_timeout",
+        minimum=0.1,
+        maximum=300.0,
+    )
+
+    identity_file = _absolute_path(
+        _required_string(transport, "identity_file", location),
+        f"{location}.identity_file",
+    )
+    known_hosts_file = _absolute_path(
+        _required_string(transport, "known_hosts_file", location),
+        f"{location}.known_hosts_file",
+    )
+
+    return SshTransportConfig(
+        host=host,
+        user=user,
+        port=port,
+        identity_file=identity_file,
+        known_hosts_file=known_hosts_file,
+        connect_timeout=connect_timeout,
+        command_timeout=command_timeout,
+    )
+
+
+def _require_mapping(value: object, location: str) -> dict[object, object]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{location} must be a mapping")
+    return value
+
+
+def _required_string(
+    mapping: dict[object, object],
+    key: str,
+    location: str,
+) -> str:
+    value = mapping.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{location}.{key} must be a non-empty string")
+    return value.strip()
+
+
+def _reject_unknown_keys(
+    mapping: dict[object, object],
+    allowed: set[str],
+    location: str,
+) -> None:
+    unknown = sorted(str(key) for key in mapping if key not in allowed)
+    if unknown:
+        raise ValueError(
+            f"{location} contains unknown keys: {', '.join(unknown)}"
+        )
+
+
+def _absolute_path(value: str, location: str) -> str:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"{location} must be an absolute path")
+    return str(path)
+
+
+def _bounded_integer(
+    value: object,
+    location: str,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{location} must be an integer")
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{location} must be between {minimum} and {maximum}")
+    return value
+
+
+def _bounded_number(
+    value: object,
+    location: str,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{location} must be a number")
+    number = float(value)
+    if not minimum <= number <= maximum:
+        raise ValueError(f"{location} must be between {minimum} and {maximum}")
+    return number
 
 
 
