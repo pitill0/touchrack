@@ -36,7 +36,7 @@ from homelab_console.providers import (
     SmartctlDiskHealthProvider,
     StorageProvider,
 )
-from homelab_console.nodes import Node, NodeRegistry, NodeRuntime
+from homelab_console.nodes import Node, NodeRegistry, NodeRuntime, build_node_registry
 from homelab_console.screens import ContainersView, HostView, ServicesView, StorageView
 from homelab_console.screens.system import ConsoleMenu
 from homelab_console.screens.containers import ContainerDetailScreen
@@ -82,17 +82,28 @@ class HomelabConsole(App[None]):
         touch_device: str = "auto",
         services_config_path: str | None = None,
         config_source_path: str | None = None,
+        nodes: NodeRegistry | None = None,
     ) -> None:
         super().__init__()
-        local_runtime = NodeRuntime(
-            node=Node(id="local", title="Local"),
-            host=provider or LocalHostProvider(),
-            containers=containers_provider or AutoContainersProvider(),
-            storage=storage_provider or LocalStorageProvider(),
-            disk_health=disk_health_provider or SmartctlDiskHealthProvider(),
+        injected_providers = (
+            provider,
+            containers_provider,
+            storage_provider,
+            disk_health_provider,
         )
-        self.nodes = NodeRegistry((local_runtime,), default_node_id="local")
-        self.active_node_id = "local"
+        if nodes is not None and any(item is not None for item in injected_providers):
+            raise ValueError("nodes and individual providers cannot be combined")
+        if nodes is None:
+            local_runtime = NodeRuntime(
+                node=Node(id="local", title="Local"),
+                host=provider or LocalHostProvider(),
+                containers=containers_provider or AutoContainersProvider(),
+                storage=storage_provider or LocalStorageProvider(),
+                disk_health=disk_health_provider or SmartctlDiskHealthProvider(),
+            )
+            nodes = NodeRegistry((local_runtime,), default_node_id="local")
+        self.nodes = nodes
+        self.active_node_id = nodes.default.node.id
         self.refresh_seconds = normalize_refresh_interval(refresh_seconds)
         # Kept for compatibility with the earlier spike API; refresh is now global.
         _ = containers_refresh_seconds
@@ -579,10 +590,7 @@ def main() -> None:
             try:
                 config = load_config()
                 HomelabConsole(
-                    storage_provider=LocalStorageProvider(config.storage.mounts),
-                    disk_health_provider=SmartctlDiskHealthProvider(
-                        devices=config.storage.disks
-                    ),
+                    nodes=build_node_registry(config),
                     refresh_seconds=config.refresh.seconds,
                     screen_blank_minutes=config.display.sleep_minutes,
                     screen_tty=config.display.tty,
