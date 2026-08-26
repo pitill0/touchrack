@@ -29,3 +29,23 @@ touch:
 
 services:
   file: services.yaml
+
+# Optional multi-node example. Remote SMART is disabled unless disk_health is
+# explicitly configured and its root-owned helper is installed on that node.
+# nodes:
+#   - id: local
+#     title: TouchRack
+#     transport:
+#       type: local
+#   - id: remote-sbc
+#     title: Remote SBC
+#     transport:
+#       type: ssh
+#       host: 192.168.50.20
+#       user: touchrack-monitor
+#       identity_file: /etc/touchrack/ssh/remote_sbc_ed25519
+#       known_hosts_file: /etc/touchrack/ssh/known_hosts
+#     disk_health:
+#       devices:
+#         - /dev/sda
+#       helper: /usr/local/libexec/touchrack-smartctl

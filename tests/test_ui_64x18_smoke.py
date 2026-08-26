@@ -52,7 +52,10 @@ async def test_physical_64x18_ui_and_modals_mount() -> None:
 
         await pilot.click("#menu-diagnostics")
         await pilot.pause()
-        assert app.screen.query_one("#diagnostics-dialog")
+        dialog = app.screen.query_one("#diagnostics-dialog")
+        rows = list(app.screen.query(".diagnostics-row"))
+        assert len(rows) == 9
+        assert all(dialog.region.contains_region(row.region) for row in rows)
 
         await pilot.click("#diagnostics-back")
         await pilot.pause()

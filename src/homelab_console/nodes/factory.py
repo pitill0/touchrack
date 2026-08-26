@@ -15,12 +15,17 @@ from homelab_console.providers import (
     LocalHostProvider,
     LocalStorageProvider,
     RemoteHostProvider,
+    RemoteContainersProvider,
+    RemoteSmartctlDiskHealthProvider,
+    RemoteStorageProvider,
     SmartctlDiskHealthProvider,
-    UnavailableContainersProvider,
     UnavailableDiskHealthProvider,
-    UnavailableStorageProvider,
 )
-from homelab_console.transports import SshCommandRunner
+from homelab_console.transports import (
+    CircuitBreakerCommandRunner,
+    SshCommandRunner,
+    SshTransportError,
+)
 
 if TYPE_CHECKING:
     from homelab_console.config import AppConfig
@@ -50,15 +55,41 @@ def _configured_runtime(
     if isinstance(transport, LocalTransportConfig):
         return _local_runtime(configured.node, config)
     if isinstance(transport, SshTransportConfig):
+        runner = CircuitBreakerCommandRunner(
+            SshCommandRunner(transport),
+            cooldown_seconds=max(5.0, transport.connect_timeout),
+            failure_types=(SshTransportError,),
+        )
         return NodeRuntime(
             node=configured.node,
             host=RemoteHostProvider(
-                SshCommandRunner(transport),
+                runner,
                 fallback_hostname=configured.node.title,
             ),
-            storage=UnavailableStorageProvider(_REMOTE_CAPABILITY_REASON),
-            containers=UnavailableContainersProvider(_REMOTE_CAPABILITY_REASON),
-            disk_health=UnavailableDiskHealthProvider(_REMOTE_CAPABILITY_REASON),
+            storage=RemoteStorageProvider(runner),
+            containers=RemoteContainersProvider(
+                runner,
+                helper=(
+                    configured.containers.helper
+                    if configured.containers is not None
+                    else None
+                ),
+            ),
+            disk_health=(
+                RemoteSmartctlDiskHealthProvider(
+                    runner,
+                    devices=configured.disk_health.devices,
+                    helper=configured.disk_health.helper,
+                )
+                if configured.disk_health is not None
+                else UnavailableDiskHealthProvider(_REMOTE_CAPABILITY_REASON)
+            ),
+            command_runner=runner,
+            container_access=(
+                "ssh-helper"
+                if configured.containers is not None
+                else "ssh-user"
+            ),
         )
     raise TypeError(f"unsupported transport config: {type(transport).__name__}")
 

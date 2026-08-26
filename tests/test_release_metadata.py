@@ -14,8 +14,8 @@ def test_project_metadata_is_release_ready_and_version_is_synced() -> None:
 
     assert project["name"] == "touchrack"
     assert project["version"] == homelab_console.__version__
-    assert project["version"] == "4.7.0"
-    assert "> Current release: **v4.7.0**." in (ROOT / "README.md").read_text()
+    assert project["version"] == "5.0.0"
+    assert "> Current release: **v5.0.0**." in (ROOT / "README.md").read_text()
     assert project["readme"] == "README.md"
     assert project["license"] == "MIT"
     assert "Environment :: Console" in project["classifiers"]
@@ -53,7 +53,10 @@ def test_local_verify_artifacts_are_ignored() -> None:
 def test_changelog_contains_current_release() -> None:
     changelog = (ROOT / "CHANGELOG.md").read_text()
 
-    assert "## [4.7.0] - 2026-08-17" in changelog
+    assert "## [5.0.0] - 2026-08-26" in changelog
+    assert "Remote Linux nodes" in changelog
+    assert "touchrack-monitor" in changelog
+    assert "circuit breaker" in changelog
     assert "9.6 UNSAFE" in changelog
     assert "4.2 OK" in changelog
     assert "homelab-console" in changelog

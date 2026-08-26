@@ -55,6 +55,7 @@ from homelab_console.button_actions import (
                 "storage-disk-open-nvme0",
             ),
         ),
+        ("select-node", ButtonAction(ButtonActionKind.NODE_SELECTOR)),
         ("nav-host", ButtonAction(ButtonActionKind.NAVIGATION, "host")),
         (
             "nav-containers",

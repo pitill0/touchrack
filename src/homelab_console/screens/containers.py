@@ -342,13 +342,13 @@ class ContainersView(Vertical):
             yield Button("SLEEP 1m", id="screen-blank-containers", classes="screen-blank-button flat-control")
 
         with Horizontal(id="containers-context"):
-            yield Static("Reading local containers…", id="containers-status")
+            yield Static("Reading containers…", id="containers-status")
         yield Label("Waiting", id="containers-last-update")
         yield Vertical(id="containers-body")
 
     def show_refreshing(self) -> None:
         if self.snapshot is None:
-            self.query_one("#containers-status", Static).update("Reading local containers…")
+            self.query_one("#containers-status", Static).update("Reading containers…")
 
     def toggle_view(self) -> None:
         self.view_mode = "list" if self.view_mode == "summary" else "summary"
@@ -417,7 +417,13 @@ class ContainersView(Vertical):
         status = self.query_one("#containers-status", Static)
         health = self.query_one("#containers-health", Static)
         health.remove_class("healthy", "degraded", "unavailable")
-        if snapshot.error:
+        if snapshot.stale:
+            status.update(f"STALE · {snapshot.stale_error or 'refresh failed'}")
+            status.set_class(True, "has-warning")
+            status.remove_class("has-error")
+            health.update("● STALE")
+            health.add_class("degraded")
+        elif snapshot.error:
             status.update(snapshot.error)
             status.set_class(True, "has-error")
             status.remove_class("has-warning")
@@ -471,9 +477,9 @@ class ContainersView(Vertical):
 
         snapshot = self.snapshot
         if snapshot is None:
-            body.mount(Static("Reading local containers…", classes="containers-empty"))
+            body.mount(Static("Reading containers…", classes="containers-empty"))
             return
-        if snapshot.error:
+        if snapshot.error and not snapshot.stale:
             body.mount(
                 Static(
                     f"{snapshot.engine} data is unavailable.\nThe host dashboard remains operational.",

@@ -1,0 +1,46 @@
+# Service examples for a TouchRack host + remote CRUX SBC topology in
+# config.multi-node.example.yaml.
+
+services:
+  # Reachability check executed from the TouchRack host.
+  - id: remote-sbc-ssh
+    title: Remote SBC SSH
+    node: remote-sbc
+    provider: tcp
+    target: 192.168.50.20:22
+    timeout: 2
+    pinned: true
+    priority: 10
+
+  # Native CRUX init-script checks executed inside the SBC over SSH.
+  - id: remote-sbc-sshd
+    title: Remote SBC SSH
+    node: remote-sbc
+    provider: crux
+    target: sshd
+    pinned: true
+    priority: 10
+
+  - id: remote-sbc-rpcbind
+    title: Remote SBC rpcbind
+    node: remote-sbc
+    provider: crux
+    target: rpcbind
+    pinned: true
+    priority: 15
+
+  - id: remote-sbc-rpc-statd
+    title: Remote SBC rpc.statd
+    node: remote-sbc
+    provider: crux
+    target: rpc.statd
+    pinned: true
+    priority: 15
+
+  - id: remote-sbc-nfsclient
+    title: Remote SBC nfsclient
+    node: remote-sbc
+    provider: crux
+    target: nfsclient
+    pinned: true
+    priority: 15

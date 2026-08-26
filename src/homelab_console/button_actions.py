@@ -16,6 +16,7 @@ class ButtonActionKind(StrEnum):
     STORAGE_OPEN = "storage_open"
     STORAGE_DISK_OPEN = "storage_disk_open"
     NAVIGATION = "navigation"
+    NODE_SELECTOR = "node_selector"
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +93,9 @@ def classify_button_action(button_id: str | None) -> ButtonAction | None:
 
     if button_id.startswith("storage-disk-open-"):
         return ButtonAction(ButtonActionKind.STORAGE_DISK_OPEN, button_id)
+
+    if button_id == "select-node":
+        return ButtonAction(ButtonActionKind.NODE_SELECTOR)
 
     if button_id.startswith("nav-"):
         return ButtonAction(

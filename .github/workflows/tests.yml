@@ -43,6 +43,23 @@ jobs:
               names = set(wheel.namelist())
 
           assert "homelab_console/console.tcss" in names
+          assert "homelab_console/nodes/runtime.py" in names
+          assert "homelab_console/transports/ssh.py" in names
+          assert "homelab_console/providers/remote.py" in names
+          assert "homelab_console/providers/remote_storage.py" in names
+          assert "homelab_console/providers/remote_containers.py" in names
+          assert "homelab_console/providers/remote_disk_health.py" in names
           assert not any(name.startswith("tests/") for name in names)
           assert not any(name.endswith("config.yaml") for name in names)
           PY
+      - name: Smoke-test built wheel
+        run: |
+          python -m pip install --force-reinstall --no-deps dist/touchrack-*.whl
+          python -c 'import homelab_console; assert homelab_console.__version__ == "5.0.0"'
+      - name: Preserve validated release wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: touchrack-5.0.0-wheel
+          path: dist/touchrack-*.whl
+          if-no-files-found: error
+          retention-days: 14

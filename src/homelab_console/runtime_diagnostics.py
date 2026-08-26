@@ -17,6 +17,10 @@ class TouchDiagnostic:
 @dataclass(frozen=True, slots=True)
 class RuntimeDiagnostics:
     version: str
+    node_id: str
+    node_title: str
+    node_transport: str
+    node_connectivity: str
     screen_tty: str
     width: int
     height: int
@@ -24,6 +28,7 @@ class RuntimeDiagnostics:
     container_engine: str | None
     container_total: int | None
     containers_error: str | None
+    container_access: str
     services_count: int | None
     services_error: str | None
     config_source_path: str | None
@@ -69,8 +74,32 @@ def build_diagnostics_rows(
     )
     blank_class = "ok" if not facts.screen_blank_error else "error"
 
+    if facts.node_transport == "local":
+        transport_value, transport_class = "LOCAL", "ok"
+    else:
+        connectivity = {
+            "online": "UP",
+            "offline": "DOWN",
+            "unknown": "--",
+        }.get(facts.node_connectivity, "--")
+        transport_value = f"{facts.node_transport.upper()} · {connectivity}"
+        transport_class = {
+            "online": "ok",
+            "offline": "error",
+            "unknown": "muted",
+        }.get(facts.node_connectivity, "muted")
+
+    access_label = {
+        "local": "local",
+        "ssh-user": "SSH user",
+        "ssh-helper": "root helper",
+    }.get(facts.container_access, facts.container_access)
+    engine_value = f"{engine_value} · {access_label}"
+
     return (
         ("VERSION", facts.version, "ok"),
+        ("NODE", f"{facts.node_title} · {facts.node_id}", "ok"),
+        ("TRANSPORT", transport_value, transport_class),
         (
             "DISPLAY",
             f"{Path(facts.screen_tty).name} · "

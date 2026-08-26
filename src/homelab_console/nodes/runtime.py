@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
 from homelab_console.nodes.models import Node
 from homelab_console.providers import (
@@ -9,6 +10,12 @@ from homelab_console.providers import (
     HostProvider,
     StorageProvider,
 )
+
+if TYPE_CHECKING:
+    from homelab_console.transports import CommandRunner
+
+
+ContainerAccess = Literal["local", "ssh-user", "ssh-helper"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,3 +27,5 @@ class NodeRuntime:
     storage: StorageProvider
     containers: ContainersProvider
     disk_health: DiskHealthProvider
+    command_runner: CommandRunner | None = None
+    container_access: ContainerAccess = "local"

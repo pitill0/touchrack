@@ -40,8 +40,8 @@ class ConsoleMenu(ModalScreen[None]):
         with Vertical(id="menu-dialog"):
             yield Label("CONSOLE MENU", id="menu-title")
             yield Static(
-                f"Local-first homelab console\n"
-                f"Host + services + containers · v{__version__}",
+                f"Multi-node homelab console\n"
+                f"Host + services + storage + containers · v{__version__}",
                 id="menu-about",
             )
             yield Button("REFRESH HOST", id="menu-refresh", classes="menu-action")

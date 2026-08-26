@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import math
+import re
 import socket
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -15,12 +16,15 @@ from urllib.parse import urlsplit
 import yaml
 
 from homelab_console.models import ContainersSnapshot
+from homelab_console.transports import CommandRunner
 
 
 SERVICE_STATUSES = ("OK", "IDLE", "WARN", "ERROR", "UNKNOWN")
 
-SUPPORTED_SERVICE_PROVIDERS = {"container", "systemd", "http", "tcp"}
+SUPPORTED_SERVICE_PROVIDERS = {"container", "crux", "systemd", "http", "tcp"}
 CONTAINER_METRICS = {"status", "cpu", "memory", "mem", "usage"}
+_NODE_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]*")
+_CRUX_SERVICE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +38,7 @@ class ServiceDefinition:
     group: str = "core"
     metric: str = "status"
     options: Mapping[str, Any] = field(default_factory=dict)
+    node_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +92,9 @@ class ContainerSnapshotServiceProvider:
             return _state(definition, "UNKNOWN", "Waiting", "Container snapshot pending", checked_at)
         if snapshot.error:
             return _state(definition, "UNKNOWN", "Unavailable", snapshot.error, checked_at, error=snapshot.error)
+        if snapshot.stale:
+            message = snapshot.stale_error or "Container snapshot is stale"
+            return _state(definition, "UNKNOWN", "Stale", message, checked_at, error=message)
         container = next(
             (item for item in snapshot.containers if item.name == definition.target),
             None,
@@ -196,6 +204,100 @@ class SystemdServiceProvider:
                 checked_at,
                 error=str(exc),
                 details=(("UNIT", definition.target),),
+            )
+
+
+class RemoteSystemdServiceProvider:
+    """Check systemd state through a node's configured command transport."""
+
+    def __init__(
+        self,
+        runner: CommandRunner,
+        timeout_seconds: float = 3.0,
+    ) -> None:
+        self.runner = runner
+        self.timeout_seconds = max(0.1, float(timeout_seconds))
+
+    async def check(self, definition: ServiceDefinition) -> ServiceState:
+        checked_at = datetime.now(timezone.utc)
+        try:
+            result = await self.runner.run(
+                ("systemctl", "is-active", definition.target),
+                timeout=self.timeout_seconds,
+            )
+            text = result.stdout.strip() or result.stderr.strip()
+            active = result.returncode == 0 and text == "active"
+            return _state(
+                definition,
+                "OK" if active else "ERROR",
+                text.upper() if text else "UNKNOWN",
+                definition.target,
+                checked_at,
+                error=None if active else text or "systemctl reported inactive",
+                details=(
+                    ("STATE", text.upper() if text else "UNKNOWN"),
+                    ("UNIT", definition.target),
+                ),
+            )
+        except Exception as exc:
+            return _state(
+                definition,
+                "UNKNOWN",
+                "Unavailable",
+                str(exc),
+                checked_at,
+                error=str(exc),
+                details=(("UNIT", definition.target),),
+            )
+
+
+class CruxServiceProvider:
+    """Check a CRUX BSD-style init script through a command transport."""
+
+    def __init__(self, runner: CommandRunner, timeout_seconds: float = 3.0) -> None:
+        self.runner = runner
+        self.timeout_seconds = max(0.1, float(timeout_seconds))
+
+    async def check(self, definition: ServiceDefinition) -> ServiceState:
+        checked_at = datetime.now(timezone.utc)
+        script = f"/etc/rc.d/{definition.target}"
+        try:
+            result = await self.runner.run(
+                (script, "status"),
+                timeout=self.timeout_seconds,
+            )
+            text = result.stdout.strip() or result.stderr.strip()
+            if result.returncode == 0:
+                status, primary, error = "OK", "RUNNING", None
+            elif result.returncode in {1, 3}:
+                status, primary = "ERROR", "STOPPED"
+                error = text or "CRUX service is not running"
+            else:
+                status, primary = "UNKNOWN", "UNKNOWN"
+                error = text or f"CRUX status exited {result.returncode}"
+            return _state(
+                definition,
+                status,
+                primary,
+                text or definition.target,
+                checked_at,
+                error=error,
+                details=(
+                    ("STATE", primary),
+                    ("SERVICE", definition.target),
+                    ("SCRIPT", script),
+                    ("EXIT", str(result.returncode)),
+                ),
+            )
+        except Exception as exc:
+            return _state(
+                definition,
+                "UNKNOWN",
+                "Unavailable",
+                str(exc),
+                checked_at,
+                error=str(exc),
+                details=(("SERVICE", definition.target), ("SCRIPT", script)),
             )
 
 
@@ -343,6 +445,7 @@ class ServicesRegistry:
                 default="status",
                 allow_empty=False,
             )
+            node_id = _optional_node_id(row, location)
 
             pinned = row.get("pinned", True)
             if not isinstance(pinned, bool):
@@ -373,6 +476,7 @@ class ServicesRegistry:
                 "priority",
                 "group",
                 "metric",
+                "node",
             }
             options = {
                 key: value
@@ -398,6 +502,7 @@ class ServicesRegistry:
                     group=group,
                     metric=metric.lower(),
                     options=options,
+                    node_id=node_id,
                 )
             )
 
@@ -461,6 +566,23 @@ def _service_target(
     return value.strip()
 
 
+def _optional_node_id(
+    row: Mapping[str, Any],
+    location: str,
+) -> str | None:
+    if "node" not in row:
+        return None
+    node_id = row["node"]
+    if not isinstance(node_id, str) or not node_id.strip():
+        raise ServiceConfigError(f"{location}.node must be a non-empty string")
+    node_id = node_id.strip()
+    if not _NODE_ID_PATTERN.fullmatch(node_id):
+        raise ServiceConfigError(
+            f"{location}.node must match [a-z0-9][a-z0-9_-]*"
+        )
+    return node_id
+
+
 def _validate_provider_config(
     *,
     provider: str,
@@ -490,6 +612,20 @@ def _validate_provider_config(
         )
 
     if provider == "systemd":
+        if target.startswith("-") or any(
+            character.isspace() for character in target
+        ):
+            raise ServiceConfigError(
+                f"{location}.target is not a safe systemd unit"
+            )
+        _reject_unknown_options(options, set(), location, provider)
+        return
+
+    if provider == "crux":
+        if not _CRUX_SERVICE_PATTERN.fullmatch(target):
+            raise ServiceConfigError(
+                f"{location}.target is not a safe CRUX service name"
+            )
         _reject_unknown_options(options, set(), location, provider)
         return
 
@@ -574,10 +710,14 @@ class ServicesManager:
         providers: Mapping[str, ServiceProvider],
         *,
         max_visible: int | None = None,
+        node_id: str | None = None,
+        local_node_id: str | None = None,
     ) -> None:
         self.registry = registry
         self.providers = dict(providers)
         self.max_visible = max_visible
+        self.node_id = node_id
+        self.local_node_id = local_node_id
         self._collect_task: asyncio.Task[ServicesSnapshot] | None = None
 
     async def collect(self) -> ServicesSnapshot:
@@ -605,6 +745,25 @@ class ServicesManager:
             return ServicesSnapshot((), collected_at, str(self.registry.path) if self.registry.path else None, str(exc))
         if not definitions:
             return ServicesSnapshot((), collected_at, str(self.registry.path) if self.registry.path else None)
+
+        if self.node_id is not None:
+            definitions = tuple(
+                definition
+                for definition in definitions
+                if (
+                    definition.node_id == self.node_id
+                    or (
+                        definition.node_id is None
+                        and self.node_id == self.local_node_id
+                    )
+                )
+            )
+        if not definitions:
+            return ServicesSnapshot(
+                (),
+                collected_at,
+                str(self.registry.path) if self.registry.path else None,
+            )
 
         states = await asyncio.gather(*(self._check(definition) for definition in definitions))
         visible = _select_visible(states, self.max_visible)

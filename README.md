@@ -9,7 +9,7 @@ Wayland, browser or desktop environment required.
 The application is built with [Textual](https://textual.textualize.io/) and
 reads the touchscreen directly through Linux `evdev`.
 
-> Current release: **v4.7.0**. Read-only by design.
+> Current release: **v5.0.0**. Read-only by design.
 
 <p align="center">
   <img
@@ -27,6 +27,8 @@ reads the touchscreen directly through Linux `evdev`.
 - **Storage** — filesystem capacity plus optional SMART disk health and detail.
 - **Containers** — Podman/Docker summary, resource hotspots and container detail.
 - **Diagnostics** — runtime display, touch, engine, services, config and sleep state.
+- **Multiple nodes** — switch between the local host and remote Linux SBCs
+  monitored read-only over hardened OpenSSH.
 - **Touch wake guard** — the first touch wakes a blanked display without activating
   the control underneath it.
 
@@ -65,6 +67,10 @@ sudo apt install smartmontools
 sudo apt install podman        # or install Docker / docker.io
 ```
 
+Remote nodes require the system OpenSSH client on the TouchRack host. Remote
+SMART monitoring additionally uses the narrowly privileged helper documented
+in [`docs/REMOTE_SMART.md`](docs/REMOTE_SMART.md).
+
 The reference Ubuntu setup uses:
 
 ```text
@@ -96,6 +102,13 @@ Create local configuration from the examples:
 ```bash
 cp config.example.yaml config.yaml
 cp services.example.yaml services.yaml
+```
+
+For a complete local + remote SBC setup instead:
+
+```bash
+cp config.multi-node.example.yaml config.yaml
+cp services.multi-node.example.yaml services.yaml
 ```
 
 For a quick manual TTY test:
@@ -178,6 +191,44 @@ Supported sleep values are `1m`, `5m`, `15m` and `on`.
 `touch.device: auto` discovers the touchscreen automatically; an explicit
 `/dev/input/eventX` path may also be used.
 
+## Remote nodes
+
+Remote Linux SBCs are configured as nodes with an SSH transport. TouchRack uses
+a dedicated unprivileged account, a per-node identity, strict pinned host keys,
+fixed timeouts and the system OpenSSH client:
+
+```yaml
+nodes:
+  - id: touchrack-host
+    title: TouchRack Host
+    transport:
+      type: local
+
+  - id: remote-sbc
+    title: Remote SBC
+    transport:
+      type: ssh
+      host: 192.168.50.20
+      user: touchrack-monitor
+      identity_file: /etc/touchrack/ssh/remote_sbc_ed25519
+      known_hosts_file: /etc/touchrack/ssh/known_hosts
+```
+
+HOST, STORAGE, CONTAINERS and node-scoped SERVICES reuse the same node runtime
+and transport. Connectivity is shown as `UP`, `DOWN` or `--`; failed refreshes
+retain the last successful snapshot with an explicit `STALE` state. A shared
+circuit breaker prevents each capability from repeatedly opening its own SSH
+connection while a node is unavailable.
+
+See [`docs/REMOTE_NODES.md`](docs/REMOTE_NODES.md) for the complete secure
+provisioning procedure, capability matrix, CRUX examples and failure semantics.
+Root-owned Podman or Docker workloads can be monitored through the opt-in,
+fixed-command helper described in
+[`docs/REMOTE_CONTAINERS.md`](docs/REMOTE_CONTAINERS.md), without granting
+Docker-group membership or general container-engine access.
+The two-node tested example lives in
+[`config.multi-node.example.yaml`](config.multi-node.example.yaml).
+
 ## Services
 
 `SERVICES` is a curated dashboard rather than another inventory. Define the
@@ -208,6 +259,7 @@ Available providers:
 | Provider | Check |
 | --- | --- |
 | `container` | Podman/Docker state and optional CPU/memory metric |
+| `crux` | CRUX `/etc/rc.d/<target> status` over the node transport |
 | `systemd` | `systemctl is-active` |
 | `http` | HTTP status |
 | `tcp` | TCP connection to `host:port` |
@@ -230,11 +282,14 @@ flowchart LR
 
     APP --> UI["Screens<br/>Host · Services · Storage · Containers · Diagnostics"]
 
-    APP --> HOST["HostProvider"]
-    APP --> STORE["StorageProvider"]
-    APP --> SMART["DiskHealthProvider"]
-    APP --> CONT["ContainersProvider"]
-    APP --> SM["ServicesManager"]
+    APP --> NR["NodeRegistry"]
+    NR --> RUN["NodeRuntime"]
+    RUN --> TRANS["local / SSH<br/>CommandRunner"]
+    RUN --> HOST["HostProvider"]
+    RUN --> STORE["StorageProvider"]
+    RUN --> SMART["DiskHealthProvider"]
+    RUN --> CONT["ContainersProvider"]
+    RUN --> SM["ServicesManager"]
 
     HOST --> LINUX["Linux / psutil"]
     STORE --> LINUX
@@ -243,6 +298,7 @@ flowchart LR
 
     SM --> CP["container"]
     SM --> SP["systemd"]
+    SM --> CR["CRUX rc.d"]
     SM --> HP["HTTP"]
     SM --> TP["TCP"]
 
@@ -267,6 +323,8 @@ src/homelab_console/  # internal Python package
 ├── config.py            application configuration
 ├── models.py            host/container state models
 ├── providers/           host, storage, SMART and container providers
+├── nodes/               node identity, registry, runtime and composition
+├── transports/          local/SSH command runners and circuit breaker
 ├── screens/             Host, Services, Storage and Containers UI
 ├── services.py          service registry/providers/normalization
 ├── touch.py             direct evdev touchscreen input

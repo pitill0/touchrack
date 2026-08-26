@@ -317,7 +317,7 @@ class StorageView(Vertical):
     def show_refreshing(self) -> None:
         if self.snapshot is None:
             status = self.query_one("#storage-status", Static)
-            status.update("Reading local filesystems…")
+            status.update("Reading filesystems…")
             status.remove_class("has-warning", "has-error")
 
     def _render_dom_ready(self) -> bool:
@@ -366,6 +366,13 @@ class StorageView(Vertical):
         status.remove_class("has-warning", "has-error")
         health.remove_class("healthy", "degraded", "unavailable")
 
+        if snapshot.stale:
+            status.update(f"STALE · {snapshot.stale_error or 'refresh failed'}")
+            status.add_class("has-warning")
+            health.update("● STALE")
+            health.add_class("degraded")
+            return
+
         if snapshot.error:
             status.update(snapshot.error)
             status.add_class("has-error")
@@ -374,7 +381,7 @@ class StorageView(Vertical):
             return
 
         if not snapshot.filesystems:
-            status.update("No local filesystems detected")
+            status.update("No filesystems detected")
             status.add_class("has-warning")
             health.update("● WARN")
             health.add_class("degraded")
@@ -474,10 +481,14 @@ class StorageView(Vertical):
                 status.update("No SMART/NVMe disks detected")
             else:
                 status.update("")
+        elif self.snapshot is not None and self.snapshot.stale:
+            status.update(
+                f"STALE · {self.snapshot.stale_error or 'refresh failed'}"
+            )
         elif self.snapshot is not None and self.snapshot.error:
             status.update(self.snapshot.error)
         elif self.snapshot is not None and not self.snapshot.filesystems:
-            status.update("No local filesystems detected")
+            status.update("No filesystems detected")
         else:
             status.update("")
 

@@ -1,5 +1,8 @@
 from pathlib import Path
 
+from homelab_console.config import load_config
+from homelab_console.services import ServicesRegistry
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -46,3 +49,81 @@ def test_standalone_architecture_documents_storage_and_smart() -> None:
     assert 'STORE["StorageProvider"]' in architecture
     assert 'SMART["DiskHealthProvider"]' in architecture
     assert 'smartctl (optional)' in architecture
+
+
+def test_remote_smart_doc_keeps_privilege_boundary_narrow() -> None:
+    doc = (ROOT / "docs/REMOTE_SMART.md").read_text()
+    helper = (ROOT / "scripts/touchrack-smartctl").read_text()
+
+    assert (
+        "NOPASSWD: /usr/local/libexec/touchrack-smartctl /dev/sda" in doc
+    )
+    assert "/etc/touchrack/allowed-disks" in doc
+    assert 'if [ "$#" -ne 1 ]' in helper
+    assert "grep -Fx" in helper
+    assert "TOUCHRACK_SMARTCTL" not in helper
+
+
+def test_remote_containers_doc_keeps_privilege_boundary_narrow() -> None:
+    doc = (ROOT / "docs/REMOTE_CONTAINERS.md").read_text()
+    helper = (ROOT / "scripts/touchrack-container-inventory").read_text()
+
+    assert "touchrack-container-inventory \"\"" in doc
+    assert 'if [ "$#" -ne 0 ]' in helper
+    assert "touchrack_containers_protocol=1" in helper
+    assert "podman ps --all --format json" in helper
+    assert "docker ps --all --no-trunc" in helper
+    assert "TOUCHRACK_" not in helper
+    for operation in (" start ", " stop ", " restart ", " exec ", " run "):
+        assert operation not in helper
+
+
+def test_remote_node_docs_and_examples_are_linked_and_parseable() -> None:
+    readme = (ROOT / "README.md").read_text()
+    guide = (ROOT / "docs/REMOTE_NODES.md").read_text()
+    config = load_config(ROOT / "config.multi-node.example.yaml")
+    services = ServicesRegistry(ROOT / "services.multi-node.example.yaml").load()
+
+    assert "docs/REMOTE_NODES.md" in readme
+    assert "config.multi-node.example.yaml" in readme
+    assert "services.multi-node.example.yaml" in guide
+    assert config.nodes is not None
+    assert [node.node.id for node in config.nodes] == [
+        "touchrack-host",
+        "remote-sbc",
+    ]
+    assert config.nodes[1].disk_health is not None
+    assert config.nodes[1].disk_health.devices == ("/dev/sda",)
+    assert config.nodes[1].containers is not None
+    assert [service.provider for service in services] == [
+        "tcp",
+        "crux",
+        "crux",
+        "crux",
+        "crux",
+    ]
+    assert all(service.node_id == "remote-sbc" for service in services)
+
+
+def test_public_examples_do_not_expose_private_installation_details() -> None:
+    public_files = (
+        ROOT / "README.md",
+        ROOT / "config.example.yaml",
+        ROOT / "config.multi-node.example.yaml",
+        ROOT / "services.example.yaml",
+        ROOT / "services.multi-node.example.yaml",
+        *(ROOT / "docs").glob("*.md"),
+    )
+    forbidden = (
+        "192.168.1.",
+        "lokalix",
+        "rpi3",
+        "odroid",
+        "orange pi",
+        "orangepi",
+    )
+
+    for path in public_files:
+        text = path.read_text().casefold()
+        for value in forbidden:
+            assert value not in text, f"{value!r} leaked into {path.name}"

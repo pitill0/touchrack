@@ -30,11 +30,26 @@ TransportConfig = LocalTransportConfig | SshTransportConfig
 
 
 @dataclass(frozen=True, slots=True)
+class RemoteDiskHealthConfig:
+    devices: tuple[str, ...]
+    helper: str = "/usr/local/libexec/touchrack-smartctl"
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteContainersConfig:
+    """Optional privileged, read-only container inventory helper."""
+
+    helper: str = "/usr/local/libexec/touchrack-container-inventory"
+
+
+@dataclass(frozen=True, slots=True)
 class ConfiguredNode:
     """One node identity paired with its transport configuration."""
 
     node: Node
     transport: TransportConfig
+    disk_health: RemoteDiskHealthConfig | None = None
+    containers: RemoteContainersConfig | None = None
 
     def __post_init__(self) -> None:
         if self.node.transport != self.transport.type:

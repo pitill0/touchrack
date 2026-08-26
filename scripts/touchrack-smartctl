@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+
+ALLOWLIST=/etc/touchrack/allowed-disks
+SMARTCTL=/usr/sbin/smartctl
+
+if [ "$#" -ne 1 ]; then
+    echo "usage: touchrack-smartctl /dev/device" >&2
+    exit 64
+fi
+
+device=$1
+case "$device" in
+    /dev/*) ;;
+    *) echo "device must be an absolute /dev path" >&2; exit 65 ;;
+esac
+
+if [ ! -r "$ALLOWLIST" ] || ! grep -Fx -- "$device" "$ALLOWLIST" >/dev/null; then
+    echo "device is not allowlisted" >&2
+    exit 77
+fi
+
+exec "$SMARTCTL" -a -j "$device"

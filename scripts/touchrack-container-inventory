@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 0 ]; then
+    echo "usage: touchrack-container-inventory" >&2
+    exit 64
+fi
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH LC_ALL=C
+
+if command -v podman >/dev/null 2>&1; then
+    engine=Podman
+elif command -v docker >/dev/null 2>&1; then
+    engine=Docker
+else
+    echo "Neither Podman nor Docker is installed or available in PATH" >&2
+    exit 127
+fi
+
+printf 'touchrack_containers_protocol=1\n'
+printf 'engine=%s\n' "$engine"
+printf 'ps_begin\n'
+if [ "$engine" = Podman ]; then
+    podman ps --all --format json
+else
+    docker ps --all --no-trunc --format '{{json .}}'
+fi
+printf 'ps_end\n'
+
+set +e
+if [ "$engine" = Podman ]; then
+    stats_output=$(podman stats --all --no-stream --format json 2>&1)
+    stats_status=$?
+else
+    stats_output=$(docker stats --all --no-stream --format '{{json .}}' 2>&1)
+    stats_status=$?
+fi
+set -e
+
+printf 'stats_status=%s\n' "$stats_status"
+printf 'stats_begin\n'
+printf '%s\n' "$stats_output"
+printf 'stats_end\n'

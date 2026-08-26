@@ -145,7 +145,15 @@ class HostView(Vertical):
         health.remove_class("healthy", "degraded", "unavailable")
         health_class = snapshot.health.lower()
         health.add_class(health_class)
-        health.update("● OK" if health_class == "healthy" else "● WARN" if health_class == "degraded" else "● DOWN")
+        health.update(
+            "● STALE"
+            if snapshot.stale
+            else "● OK"
+            if health_class == "healthy"
+            else "● WARN"
+            if health_class == "degraded"
+            else "● DOWN"
+        )
 
         self.query_one("#metric-cpu", ResourceMetricRow).set_metric(
             f"{snapshot.cpu_percent:.0f}%",
@@ -164,7 +172,29 @@ class HostView(Vertical):
         )
         temperature_row = self.query_one("#metric-temperature", TemperatureRow)
         temperature_row.set_temperature(snapshot.temperature_c)
-        temperature_row.set_uptime(snapshot.uptime_seconds, error=snapshot.error)
+        temperature_row.set_uptime(
+            snapshot.uptime_seconds,
+            error="stale" if snapshot.stale else snapshot.error,
+        )
+        if snapshot.stale:
+            self.query_one("#host-uptime", Label).update("STALE DATA")
+
+    def show_node_switching(self, title: str) -> None:
+        """Clear host identity while a newly selected node is collected."""
+        self.snapshot = None
+        self.query_one("#host-name", Label).update(title.upper())
+        health = self.query_one("#host-health", Static)
+        health.remove_class("healthy", "degraded", "unavailable")
+        health.update("● --")
+        for selector in ("#metric-cpu", "#metric-memory", "#metric-disk"):
+            self.query_one(selector, ResourceMetricRow).set_metric(
+                "—",
+                percentage=None,
+                detail="Waiting for data",
+            )
+        temperature = self.query_one("#metric-temperature", TemperatureRow)
+        temperature.set_temperature(None)
+        temperature.set_uptime(0)
 
     def show_refreshing(self) -> None:
         """No animated host footer: refresh cadence is already shown in the header."""

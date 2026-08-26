@@ -18,11 +18,15 @@ class HostSnapshot:
     ip_address: str | None
     collected_at: datetime
     error: str | None = None
+    stale: bool = False
+    stale_error: str | None = None
 
     @property
     def health(self) -> str:
         if self.error:
             return "Unavailable"
+        if self.stale:
+            return "Degraded"
         if self.temperature_c is None or self.ip_address is None:
             return "Degraded"
         return "Healthy"
@@ -51,6 +55,8 @@ class ContainersSnapshot:
     engine: str = "Unknown"
     error: str | None = None
     stats_error: str | None = None
+    stale: bool = False
+    stale_error: str | None = None
 
     @property
     def total(self) -> int:
@@ -83,6 +89,8 @@ class StorageSnapshot:
     filesystems: tuple[FilesystemInfo, ...]
     collected_at: datetime
     error: str | None = None
+    stale: bool = False
+    stale_error: str | None = None
 
     @property
     def total(self) -> int:

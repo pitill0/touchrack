@@ -10,15 +10,18 @@ import pytest
 from homelab_console.models import ContainerInfo, ContainersSnapshot
 from homelab_console.services import (
     ContainerSnapshotServiceProvider,
+    CruxServiceProvider,
     ServiceConfigError,
     ServiceDefinition,
     ServiceState,
+    RemoteSystemdServiceProvider,
     ServicesManager,
     ServicesRegistry,
     SystemdServiceProvider,
     TcpServiceProvider,
     _select_visible,
 )
+from homelab_console.transports import CommandResult, SshConnectionError
 
 
 @pytest.mark.asyncio
@@ -51,6 +54,25 @@ async def test_container_service_uses_existing_snapshot() -> None:
     assert state.primary == "MEM 4.40%"
 
 
+@pytest.mark.asyncio
+async def test_container_service_does_not_report_stale_inventory_as_healthy() -> None:
+    snapshot = ContainersSnapshot(
+        containers=(),
+        collected_at=datetime.now(timezone.utc),
+        stale=True,
+        stale_error="SSH timed out",
+    )
+    provider = ContainerSnapshotServiceProvider(lambda: snapshot)
+
+    state = await provider.check(
+        ServiceDefinition("demo", "Demo", "container", "demo")
+    )
+
+    assert state.status == "UNKNOWN"
+    assert state.primary == "Stale"
+    assert state.error == "SSH timed out"
+
+
 def test_unpinned_error_is_promoted_ahead_of_pinned_services() -> None:
     now = datetime.now(timezone.utc)
     states = [
@@ -60,6 +82,110 @@ def test_unpinned_error_is_promoted_ahead_of_pinned_services() -> None:
     ]
     visible = _select_visible(states, 2)
     assert [state.id for state in visible] == ["x", "a"]
+
+
+@pytest.mark.asyncio
+async def test_remote_systemd_provider_uses_runner_without_privilege_escalation() -> None:
+    class Runner:
+        def __init__(self) -> None:
+            self.commands = []
+
+        async def run(self, command, *, timeout=None):
+            self.commands.append((command, timeout))
+            return CommandResult(command, "active\n", "", 0)
+
+    runner = Runner()
+    provider = RemoteSystemdServiceProvider(runner)
+    definition = ServiceDefinition(
+        "sshd",
+        "SSH",
+        "systemd",
+        "sshd.service",
+        node_id="rpi3",
+    )
+
+    state = await provider.check(definition)
+
+    assert state.status == "OK"
+    assert state.primary == "ACTIVE"
+    assert runner.commands == [
+        (("systemctl", "is-active", "sshd.service"), 3.0)
+    ]
+    assert "sudo" not in runner.commands[0][0]
+
+
+@pytest.mark.asyncio
+async def test_remote_systemd_provider_normalizes_inactive_and_transport_error() -> None:
+    class Runner:
+        def __init__(self, result=None, error=None) -> None:
+            self.result = result
+            self.error = error
+
+        async def run(self, command, *, timeout=None):
+            if self.error:
+                raise self.error
+            return self.result
+
+    definition = ServiceDefinition("demo", "Demo", "systemd", "demo.service")
+    inactive = await RemoteSystemdServiceProvider(
+        Runner(CommandResult(("systemctl",), "inactive\n", "", 3))
+    ).check(definition)
+    unavailable = await RemoteSystemdServiceProvider(
+        Runner(error=SshConnectionError("connection refused"))
+    ).check(definition)
+
+    assert inactive.status == "ERROR"
+    assert inactive.error == "inactive"
+    assert unavailable.status == "UNKNOWN"
+    assert unavailable.error == "connection refused"
+
+
+@pytest.mark.asyncio
+async def test_crux_provider_checks_absolute_rc_script_without_shell() -> None:
+    class Runner:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def run(self, command, *, timeout=None):
+            self.calls.append((command, timeout))
+            return CommandResult(
+                command,
+                "/usr/sbin/sshd is running with pid 123\n",
+                "",
+                0,
+            )
+
+    runner = Runner()
+    state = await CruxServiceProvider(runner).check(
+        ServiceDefinition("ssh", "SSH", "crux", "sshd")
+    )
+
+    assert runner.calls == [(("/etc/rc.d/sshd", "status"), 3.0)]
+    assert state.status == "OK"
+    assert state.primary == "RUNNING"
+    assert ("EXIT", "0") in state.details
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("returncode", "expected_status", "expected_primary"),
+    [(1, "ERROR", "STOPPED"), (3, "ERROR", "STOPPED"), (4, "UNKNOWN", "UNKNOWN")],
+)
+async def test_crux_provider_normalizes_status_exit_codes(
+    returncode,
+    expected_status,
+    expected_primary,
+) -> None:
+    class Runner:
+        async def run(self, command, *, timeout=None):
+            return CommandResult(command, "sshd status", "", returncode)
+
+    state = await CruxServiceProvider(Runner()).check(
+        ServiceDefinition("ssh", "SSH", "crux", "sshd")
+    )
+
+    assert state.status == expected_status
+    assert state.primary == expected_primary
 
 
 
@@ -327,6 +453,7 @@ services:
     pinned: false
     priority: 42
     group: edge
+    node: rpi3
     metric: status
     timeout: 1.5
 """.strip(),
@@ -344,6 +471,7 @@ services:
     assert definition.pinned is False
     assert definition.priority == 42
     assert definition.group == "edge"
+    assert definition.node_id == "rpi3"
     assert definition.metric == "status"
     assert definition.options == {"timeout": 1.5}
 
@@ -372,6 +500,16 @@ services:
         (
             "services:\n  - id: demo\n    provider: http\n",
             "services[0].target must be a non-empty string",
+        ),
+        (
+            "services:\n  - id: demo\n    provider: systemd\n"
+            "    target: sshd\n    node: RPi3\n",
+            "services[0].node must match [a-z0-9][a-z0-9_-]*",
+        ),
+        (
+            "services:\n  - id: demo\n    provider: systemd\n"
+            "    target: -bad\n",
+            "services[0].target is not a safe systemd unit",
         ),
     ],
 )
@@ -431,6 +569,60 @@ services:
     assert snapshot.error == "services[0].pinned must be a boolean"
 
 
+@pytest.mark.asyncio
+async def test_services_manager_filters_unscoped_and_node_scoped_definitions() -> None:
+    class Registry:
+        path = None
+
+        def load(self):
+            return (
+                ServiceDefinition("local", "Local", "fake", "local"),
+                ServiceDefinition(
+                    "remote",
+                    "Remote",
+                    "fake",
+                    "remote",
+                    node_id="rpi3",
+                ),
+                ServiceDefinition(
+                    "other",
+                    "Other",
+                    "fake",
+                    "other",
+                    node_id="opi5",
+                ),
+            )
+
+    class Provider:
+        async def check(self, definition):
+            return ServiceState(
+                definition.id,
+                definition.title,
+                definition.provider,
+                definition.target,
+                "OK",
+                "UP",
+                definition.target,
+                datetime.now(timezone.utc),
+            )
+
+    local = await ServicesManager(
+        Registry(),
+        {"fake": Provider()},
+        node_id="lokalix",
+        local_node_id="lokalix",
+    ).collect()
+    remote = await ServicesManager(
+        Registry(),
+        {"fake": Provider()},
+        node_id="rpi3",
+        local_node_id="lokalix",
+    ).collect()
+
+    assert [state.id for state in local.services] == ["local"]
+    assert [state.id for state in remote.services] == ["remote"]
+
+
 
 def test_services_registry_accepts_all_supported_provider_shapes(tmp_path) -> None:
     path = tmp_path / "services.yaml"
@@ -444,6 +636,9 @@ services:
   - id: systemd-demo
     provider: systemd
     target: ssh.service
+  - id: crux-demo
+    provider: crux
+    target: sshd
   - id: http-demo
     provider: http
     target: https://example.test/health
@@ -462,12 +657,13 @@ services:
     assert [definition.provider for definition in definitions] == [
         "container",
         "systemd",
+        "crux",
         "http",
         "tcp",
     ]
     assert definitions[0].metric == "usage"
-    assert definitions[2].options == {"timeout": 1.25, "expect": 204}
-    assert definitions[3].options == {"timeout": 0.5}
+    assert definitions[3].options == {"timeout": 1.25, "expect": 204}
+    assert definitions[4].options == {"timeout": 0.5}
 
 
 @pytest.mark.parametrize(
@@ -475,7 +671,7 @@ services:
     [
         (
             "provider: mystery\n    target: demo",
-            "services[0].provider must be one of: container, http, systemd, tcp",
+            "services[0].provider must be one of: container, crux, http, systemd, tcp",
         ),
         (
             "provider: container\n    target: demo\n    metric: latency",
@@ -484,6 +680,10 @@ services:
         (
             "provider: systemd\n    target: ssh.service\n    metric: cpu",
             "services[0].metric for systemd must be 'status'",
+        ),
+        (
+            "provider: crux\n    target: ../sshd",
+            "services[0].target is not a safe CRUX service name",
         ),
         (
             "provider: http\n    target: ftp://example.test/health",

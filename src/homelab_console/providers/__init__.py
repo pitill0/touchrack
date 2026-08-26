@@ -12,6 +12,9 @@ from homelab_console.providers.containers import (
 from homelab_console.providers.disk_health import SmartctlDiskHealthProvider
 from homelab_console.providers.local import LocalHostProvider
 from homelab_console.providers.remote import RemoteHostProvider
+from homelab_console.providers.remote_containers import RemoteContainersProvider
+from homelab_console.providers.remote_disk_health import RemoteSmartctlDiskHealthProvider
+from homelab_console.providers.remote_storage import RemoteStorageProvider
 from homelab_console.providers.storage import LocalStorageProvider
 from homelab_console.providers.unavailable import (
     UnavailableContainersProvider,
@@ -26,6 +29,9 @@ __all__ = [
     "HostProvider",
     "LocalHostProvider",
     "RemoteHostProvider",
+    "RemoteContainersProvider",
+    "RemoteSmartctlDiskHealthProvider",
+    "RemoteStorageProvider",
     "PodmanContainersProvider",
     "LocalStorageProvider",
     "StorageProvider",

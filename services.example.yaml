@@ -3,9 +3,14 @@
 #
 # Supported providers:
 #   container  - Podman/Docker container state and optional CPU/memory metric
+#   crux       - CRUX /etc/rc.d service status through the node transport
 #   systemd    - systemctl is-active
 #   http       - HTTP status check
 #   tcp        - TCP connect check
+#
+# Optional node scope:
+#   - entries without `node` belong to the local node (backward compatible)
+#   - set `node` to a configured node id for a remote-node service
 
 services:
   - id: dashboard
@@ -31,6 +36,24 @@ services:
     target: ssh
     pinned: true
     priority: 30
+
+  # Example remote systemd check (uncomment and adapt the node id):
+  # - id: remote-sshd
+  #   title: Remote SSH
+  #   node: remote-server
+  #   provider: systemd
+  #   target: sshd
+  #   pinned: true
+  #   priority: 30
+
+  # Example remote CRUX check (the SSH user needs execute access to the script):
+  # - id: remote-sbc-sshd
+  #   title: Remote SBC SSH
+  #   node: remote-sbc
+  #   provider: crux
+  #   target: sshd
+  #   pinned: true
+  #   priority: 30
 
   - id: database
     title: Database

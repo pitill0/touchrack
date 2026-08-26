@@ -36,15 +36,30 @@ from homelab_console.providers import (
     SmartctlDiskHealthProvider,
     StorageProvider,
 )
-from homelab_console.nodes import Node, NodeRegistry, NodeRuntime, build_node_registry
-from homelab_console.screens import ContainersView, HostView, ServicesView, StorageView
+from homelab_console.nodes import (
+    Node,
+    NodeConnectivityRegistry,
+    LastSuccessfulSnapshotStore,
+    NodeRegistry,
+    NodeRuntime,
+    build_node_registry,
+)
+from homelab_console.screens import (
+    ContainersView,
+    HostView,
+    NodeSelectorScreen,
+    ServicesView,
+    StorageView,
+)
 from homelab_console.screens.system import ConsoleMenu
 from homelab_console.screens.containers import ContainerDetailScreen
 from homelab_console.screens.services import ServiceDetailScreen
 from homelab_console.screens.storage import DiskDetailScreen, StorageDetailScreen
 from homelab_console.services import (
     ContainerSnapshotServiceProvider,
+    CruxServiceProvider,
     HttpServiceProvider,
+    RemoteSystemdServiceProvider,
     ServicesManager,
     ServicesRegistry,
     SystemdServiceProvider,
@@ -103,6 +118,10 @@ class HomelabConsole(App[None]):
             )
             nodes = NodeRegistry((local_runtime,), default_node_id="local")
         self.nodes = nodes
+        self.node_connectivity = NodeConnectivityRegistry(
+            tuple(runtime.node.id for runtime in nodes)
+        )
+        self.node_snapshots = LastSuccessfulSnapshotStore()
         self.active_node_id = nodes.default.node.id
         self.refresh_seconds = normalize_refresh_interval(refresh_seconds)
         # Kept for compatibility with the earlier spike API; refresh is now global.
@@ -116,15 +135,19 @@ class HomelabConsole(App[None]):
         self.screen_blank_error: str | None = None
         self.config_source_path = config_source_path
         self.services_registry = ServicesRegistry(services_config_path)
-        self.services_manager = ServicesManager(
-            self.services_registry,
-            {
-                "container": ContainerSnapshotServiceProvider(self._containers_snapshot),
-                "systemd": SystemdServiceProvider(),
-                "http": HttpServiceProvider(),
-                "tcp": TcpServiceProvider(),
-            },
+        self._container_snapshots = {}
+        self._local_node_id = next(
+            (
+                runtime.node.id
+                for runtime in self.nodes
+                if runtime.node.transport == "local"
+            ),
+            self.nodes.default.node.id,
         )
+        self._services_managers: dict[str, ServicesManager] = {}
+        # Compatibility attribute for code that inspected the former single
+        # manager. It always follows the active node context.
+        self.services_manager = self._services_manager(self.active_node)
         self.touch_reader: TouchReader | None = None
         self._touch_state_lock = threading.Lock()
         self._last_touch_activity = monotonic()
@@ -175,6 +198,12 @@ class HomelabConsole(App[None]):
             yield Button("SERVICES", id="nav-services", classes="nav")
             yield Button("STORAGE", id="nav-storage", classes="nav")
             yield Button("CONTAINERS", id="nav-containers", classes="nav")
+            if len(self.nodes) > 1:
+                yield Button(
+                    self.active_node.node.id.upper(),
+                    id="select-node",
+                    classes="nav",
+                )
 
     def on_mount(self) -> None:
         # Defer the initial workers until Textual has completed the first
@@ -183,11 +212,12 @@ class HomelabConsole(App[None]):
         # those children being attached to the DOM.
         self.call_after_refresh(self._initial_refresh)
         self._last_scheduled_refresh = monotonic()
-        self.set_interval(1.0, self._refresh_scheduler_tick)
         # Keep display sleep independent from data refresh / modal screens.
         self.set_interval(1.0, self._screen_blank_tick)
+        self.set_interval(1.0, self._refresh_scheduler_tick)
         self.set_interval(1.0, self._update_snapshot_ages)
         self._update_snapshot_ages()
+        self._update_node_selector()
         self._apply_layout_profile()
         self._update_refresh_controls()
         self._update_screen_blank_controls()
@@ -195,6 +225,10 @@ class HomelabConsole(App[None]):
         self._start_touch_reader()
 
     def _initial_refresh(self) -> None:
+        self._refresh_active_capabilities()
+
+    def _refresh_active_capabilities(self) -> None:
+        """Start one refresh batch for the active node."""
         self.refresh_host()
         self.refresh_containers()
         self.refresh_storage()
@@ -250,6 +284,12 @@ class HomelabConsole(App[None]):
         except (OSError, RuntimeError, subprocess.SubprocessError):
             # The wake gesture must still be consumed if setterm fails.
             pass
+        self.call_from_thread(self._resume_refresh_after_wake)
+
+    def _resume_refresh_after_wake(self) -> None:
+        """Refresh once after sleep without replaying missed intervals."""
+        self._last_scheduled_refresh = monotonic()
+        self._refresh_active_capabilities()
 
     def _receive_touch_from_thread(self, tap: TouchTap) -> None:
         with self._touch_state_lock:
@@ -346,6 +386,12 @@ class HomelabConsole(App[None]):
         return build_diagnostics_rows(
             RuntimeDiagnostics(
                 version=__version__,
+                node_id=self.active_node.node.id,
+                node_title=self.active_node.node.title,
+                node_transport=self.active_node.node.transport,
+                node_connectivity=self.node_connectivity.get(
+                    self.active_node.node.id
+                ).status,
                 screen_tty=self.screen_tty,
                 width=self.size.width,
                 height=self.size.height,
@@ -359,6 +405,7 @@ class HomelabConsole(App[None]):
                 containers_error=(
                     containers.error if containers is not None else None
                 ),
+                container_access=self.active_node.container_access,
                 services_count=(
                     len(services.services) if services is not None else None
                 ),
@@ -376,12 +423,13 @@ class HomelabConsole(App[None]):
 
     def _refresh_scheduler_tick(self) -> None:
         now = monotonic()
+        with self._touch_state_lock:
+            if self._display_blanked:
+                return
         if now - self._last_scheduled_refresh < self.refresh_seconds:
             return
         self._last_scheduled_refresh = now
-        self.refresh_host()
-        self.refresh_containers()
-        self.refresh_storage()
+        self._refresh_active_capabilities()
 
     def _screen_blank_tick(self) -> None:
         """Drive display sleep from a dedicated app-level timer."""
@@ -392,9 +440,7 @@ class HomelabConsole(App[None]):
         self._last_scheduled_refresh = monotonic()
         self._update_refresh_controls()
         # Apply the new selection immediately, then start counting the new interval.
-        self.refresh_host()
-        self.refresh_containers()
-        self.refresh_storage()
+        self._refresh_active_capabilities()
 
     def _update_refresh_controls(self) -> None:
         label = refresh_interval_label(
@@ -468,18 +514,53 @@ class HomelabConsole(App[None]):
                     or "Cycle display blanking: 1m, 5m, 15m, always on"
                 )
 
+    def _update_node_selector(self) -> None:
+        buttons = self.query("#select-node")
+        for button in buttons:
+            if isinstance(button, Button):
+                button.label = self.active_node.node.id.upper()
+                button.tooltip = f"Active node: {self.active_node.node.title}"
+
+    def select_node(self, node_id: str) -> None:
+        """Activate a configured runtime and refresh its capability views."""
+        runtime = self.nodes.get(node_id)
+        if node_id == self.active_node_id:
+            return
+
+        self.active_node_id = node_id
+        self.services_manager = self._services_manager(runtime)
+        self._last_scheduled_refresh = monotonic()
+        self._update_node_selector()
+        self.show_section("host")
+        self.query_one(HostView).show_node_switching(runtime.node.title)
+        self._refresh_active_capabilities()
+
     @work(exclusive=True, group="host-refresh")
     async def refresh_host(self) -> None:
         host_view = self.query_one(HostView)
         host_view.show_refreshing()
-        snapshot = await self.active_node.host.collect()
+        runtime = self.active_node
+        snapshot = await runtime.host.collect()
+        if self.active_node_id != runtime.node.id:
+            return
+        self.node_connectivity.record(runtime.node.id, error=snapshot.error)
+        snapshot = self.node_snapshots.resolve(
+            runtime.node.id, "host", snapshot
+        )
         host_view.show_snapshot(snapshot)
 
     @work(exclusive=True, group="containers-refresh")
     async def refresh_containers(self) -> None:
         containers_view = self.query_one(ContainersView)
         containers_view.show_refreshing()
-        snapshot = await self.active_node.containers.collect()
+        runtime = self.active_node
+        snapshot = await runtime.containers.collect()
+        if self.active_node_id != runtime.node.id:
+            return
+        snapshot = self.node_snapshots.resolve(
+            runtime.node.id, "containers", snapshot
+        )
+        self._container_snapshots[runtime.node.id] = snapshot
         containers_view.show_snapshot(snapshot)
         self.refresh_services()
 
@@ -487,8 +568,14 @@ class HomelabConsole(App[None]):
     async def refresh_storage(self) -> None:
         storage_view = self.query_one(StorageView)
         storage_view.show_refreshing()
-        snapshot = await self.active_node.storage.collect()
-        disk_snapshot = await self.active_node.disk_health.collect()
+        runtime = self.active_node
+        snapshot = await runtime.storage.collect()
+        disk_snapshot = await runtime.disk_health.collect()
+        if self.active_node_id != runtime.node.id:
+            return
+        snapshot = self.node_snapshots.resolve(
+            runtime.node.id, "storage", snapshot
+        )
         storage_view.show_snapshot(snapshot)
         storage_view.show_disk_snapshot(disk_snapshot)
 
@@ -496,12 +583,47 @@ class HomelabConsole(App[None]):
     async def refresh_services(self) -> None:
         services_view = self.query_one(ServicesView)
         services_view.show_refreshing()
-        snapshot = await self.services_manager.collect()
+        runtime = self.active_node
+        manager = self._services_manager(runtime)
+        snapshot = await manager.collect()
+        if self.active_node_id != runtime.node.id:
+            return
         services_view.show_snapshot(snapshot)
+
+    def _services_manager(self, runtime: NodeRuntime) -> ServicesManager:
+        existing = self._services_managers.get(runtime.node.id)
+        if existing is not None:
+            return existing
+
+        providers = {
+            "container": ContainerSnapshotServiceProvider(
+                lambda node_id=runtime.node.id: self._container_snapshots.get(
+                    node_id
+                )
+            ),
+            "http": HttpServiceProvider(),
+            "tcp": TcpServiceProvider(),
+        }
+        if runtime.node.transport == "local":
+            providers["systemd"] = SystemdServiceProvider()
+        elif runtime.command_runner is not None:
+            providers["systemd"] = RemoteSystemdServiceProvider(
+                runtime.command_runner
+            )
+            providers["crux"] = CruxServiceProvider(runtime.command_runner)
+
+        manager = ServicesManager(
+            self.services_registry,
+            providers,
+            node_id=runtime.node.id,
+            local_node_id=self._local_node_id,
+        )
+        self._services_managers[runtime.node.id] = manager
+        return manager
 
     def _containers_snapshot(self):
         try:
-            return self.query_one(ContainersView).snapshot
+            return self._container_snapshots.get(self.active_node_id)
         except Exception:
             return None
 
@@ -566,6 +688,16 @@ class HomelabConsole(App[None]):
             disk = self.query_one(StorageView).disk_for_button(str(action.value))
             if disk is not None:
                 self.push_screen(DiskDetailScreen(disk))
+            return
+
+        if action.kind is ButtonActionKind.NODE_SELECTOR:
+            self.push_screen(
+                NodeSelectorScreen(
+                    self.nodes.all(),
+                    active_node_id=self.active_node_id,
+                    connectivity=self.node_connectivity.all(),
+                )
+            )
             return
 
         if action.kind is ButtonActionKind.NAVIGATION:

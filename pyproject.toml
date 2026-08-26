@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "touchrack"
-version = "4.7.0"
+version = "5.0.0"
 description = "A touch-first, modular homelab console for physical Linux TTY displays."
 readme = "README.md"
 license = "MIT"

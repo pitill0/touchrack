@@ -1,0 +1,53 @@
+# Complete two-node example based on a tested TouchRack installation.
+# Copy to config.yaml, then adapt addresses, paths and device names.
+
+display:
+  tty: /dev/tty1
+  sleep: 1m
+
+refresh:
+  seconds: 30
+
+touch:
+  enabled: true
+  device: auto
+
+nodes:
+  - id: touchrack-host
+    title: TouchRack Host
+    transport:
+      type: local
+
+  - id: remote-sbc
+    title: Remote SBC
+    transport:
+      type: ssh
+      host: 192.168.50.20
+      user: touchrack-monitor
+      port: 22
+      identity_file: /etc/touchrack/ssh/remote_sbc_ed25519
+      known_hosts_file: /etc/touchrack/ssh/known_hosts
+      connect_timeout: 3
+      command_timeout: 5
+    # Optional: requires the remote helper documented in docs/REMOTE_SMART.md.
+    disk_health:
+      devices:
+        - /dev/sda
+      helper: /usr/local/libexec/touchrack-smartctl
+    # Optional for root-owned containers; see docs/REMOTE_CONTAINERS.md.
+    containers:
+      helper: /usr/local/libexec/touchrack-container-inventory
+
+# Top-level storage selection applies to the local node. Remote filesystems are
+# discovered on the remote host; remote SMART devices are declared per node.
+storage:
+  mounts:
+    - /
+    - /mnt/images
+    - /boot
+  disks:
+    - /dev/sda
+    - /dev/nvme0
+
+services:
+  file: services.yaml

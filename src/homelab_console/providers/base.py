@@ -17,13 +17,13 @@ class HostProvider(Protocol):
 
 class ContainersProvider(Protocol):
     async def collect(self) -> ContainersSnapshot:
-        """Return one immutable snapshot of local containers."""
+        """Return one immutable container snapshot for the configured node."""
 
 
 
 class StorageProvider(Protocol):
     async def collect(self) -> StorageSnapshot:
-        """Return one immutable snapshot of local filesystems."""
+        """Return one immutable filesystem snapshot for the configured node."""
 
 
 

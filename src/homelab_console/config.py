@@ -9,6 +9,8 @@ import yaml
 from homelab_console.nodes.config import (
     ConfiguredNode,
     LocalTransportConfig,
+    RemoteContainersConfig,
+    RemoteDiskHealthConfig,
     SshTransportConfig,
 )
 from homelab_console.nodes.models import Node
@@ -172,7 +174,7 @@ def _parse_nodes(
         node_mapping = _require_mapping(raw_node, location)
         _reject_unknown_keys(
             node_mapping,
-            {"id", "title", "transport"},
+            {"id", "title", "transport", "disk_health", "containers"},
             location,
         )
 
@@ -209,14 +211,65 @@ def _parse_nodes(
                 f"{location}.transport.type must be one of: local, ssh"
             )
 
+        disk_health = _parse_remote_disk_health(node_mapping, location)
+        if disk_health is not None and transport.type != "ssh":
+            raise ValueError(f"{location}.disk_health requires SSH transport")
+        containers = _parse_remote_containers(node_mapping, location)
+        if containers is not None and transport.type != "ssh":
+            raise ValueError(f"{location}.containers requires SSH transport")
+
         configured.append(
             ConfiguredNode(
                 node=Node(id=node_id, title=title, transport=transport.type),
                 transport=transport,
+                disk_health=disk_health,
+                containers=containers,
             )
         )
 
     return tuple(configured)
+
+
+def _parse_remote_disk_health(
+    node: dict[object, object],
+    node_location: str,
+) -> RemoteDiskHealthConfig | None:
+    if "disk_health" not in node:
+        return None
+    location = f"{node_location}.disk_health"
+    section = _require_mapping(node["disk_health"], location)
+    _reject_unknown_keys(section, {"devices", "helper"}, location)
+    devices = _parse_string_list(
+        section,
+        "devices",
+        require_absolute=True,
+        section_name=location,
+    )
+    if not devices:
+        raise ValueError(f"{location}.devices must contain at least one device")
+    helper_value = section.get("helper", "/usr/local/libexec/touchrack-smartctl")
+    if not isinstance(helper_value, str) or not helper_value.strip():
+        raise ValueError(f"{location}.helper must be a non-empty string")
+    helper = _absolute_path(helper_value.strip(), f"{location}.helper")
+    return RemoteDiskHealthConfig(devices=devices, helper=helper)
+
+
+def _parse_remote_containers(
+    node: dict[object, object],
+    node_location: str,
+) -> RemoteContainersConfig | None:
+    if "containers" not in node:
+        return None
+    location = f"{node_location}.containers"
+    section = _require_mapping(node["containers"], location)
+    _reject_unknown_keys(section, {"helper"}, location)
+    helper_value = section.get(
+        "helper", "/usr/local/libexec/touchrack-container-inventory"
+    )
+    if not isinstance(helper_value, str) or not helper_value.strip():
+        raise ValueError(f"{location}.helper must be a non-empty string")
+    helper = _absolute_path(helper_value.strip(), f"{location}.helper")
+    return RemoteContainersConfig(helper=helper)
 
 
 def _parse_ssh_transport(

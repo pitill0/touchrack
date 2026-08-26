@@ -76,20 +76,16 @@ class PodmanContainersProvider(CliContainersProvider):
         except (TimeoutError, RuntimeError, json.JSONDecodeError) as exc:
             return _unavailable(collected_at, self.engine, f"Unable to read Podman containers: {exc}")
 
-        stats_by_id: dict[str, dict[str, Any]] = {}
+        stats_rows: list[dict[str, Any]] = []
         stats_error: str | None = None
         try:
             stats_rows = await self._run_json_list(
                 "stats", "--all", "--no-stream", "--format", "json"
             )
-            stats_by_id = _index_stats(stats_rows)
         except (TimeoutError, RuntimeError, json.JSONDecodeError) as exc:
             stats_error = f"Resource statistics unavailable: {exc}"
 
-        containers = tuple(
-            _build_podman_container(row, stats_by_id)
-            for row in sorted(ps_rows, key=_podman_sort_key)
-        )
+        containers = normalize_podman_rows(ps_rows, stats_rows)
         return ContainersSnapshot(
             containers=containers,
             collected_at=collected_at,
@@ -99,12 +95,7 @@ class PodmanContainersProvider(CliContainersProvider):
 
     async def _run_json_list(self, *args: str) -> list[dict[str, Any]]:
         decoded = await self._run(*args)
-        if not decoded:
-            return []
-        payload = json.loads(decoded)
-        if not isinstance(payload, list):
-            raise json.JSONDecodeError("expected a JSON list", decoded, 0)
-        return [row for row in payload if isinstance(row, dict)]
+        return decode_json_list(decoded)
 
 
 class DockerContainersProvider(CliContainersProvider):
@@ -126,20 +117,16 @@ class DockerContainersProvider(CliContainersProvider):
         except (TimeoutError, RuntimeError, json.JSONDecodeError) as exc:
             return _unavailable(collected_at, self.engine, f"Unable to read Docker containers: {exc}")
 
-        stats_by_id: dict[str, dict[str, Any]] = {}
+        stats_rows: list[dict[str, Any]] = []
         stats_error: str | None = None
         try:
             stats_rows = await self._run_json_lines(
                 "stats", "--all", "--no-stream", "--format", "{{json .}}"
             )
-            stats_by_id = _index_stats(stats_rows)
         except (TimeoutError, RuntimeError, json.JSONDecodeError) as exc:
             stats_error = f"Resource statistics unavailable: {exc}"
 
-        containers = tuple(
-            _build_docker_container(row, stats_by_id)
-            for row in sorted(ps_rows, key=_docker_sort_key)
-        )
+        containers = normalize_docker_rows(ps_rows, stats_rows)
         return ContainersSnapshot(
             containers=containers,
             collected_at=collected_at,
@@ -149,17 +136,7 @@ class DockerContainersProvider(CliContainersProvider):
 
     async def _run_json_lines(self, *args: str) -> list[dict[str, Any]]:
         decoded = await self._run(*args)
-        if not decoded:
-            return []
-        rows: list[dict[str, Any]] = []
-        for line in decoded.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            payload = json.loads(line)
-            if isinstance(payload, dict):
-                rows.append(payload)
-        return rows
+        return decode_json_lines(decoded)
 
 
 class AutoContainersProvider:
@@ -195,6 +172,51 @@ class AutoContainersProvider:
 def _unavailable(collected_at: datetime, engine: str, message: str) -> ContainersSnapshot:
     return ContainersSnapshot(
         containers=(), collected_at=collected_at, engine=engine, error=message
+    )
+
+
+def decode_json_list(decoded: str) -> list[dict[str, Any]]:
+    """Decode the JSON-list format shared by local and remote Podman."""
+    if not decoded.strip():
+        return []
+    payload = json.loads(decoded)
+    if not isinstance(payload, list):
+        raise json.JSONDecodeError("expected a JSON list", decoded, 0)
+    return [row for row in payload if isinstance(row, dict)]
+
+
+def decode_json_lines(decoded: str) -> list[dict[str, Any]]:
+    """Decode Docker's one-JSON-object-per-line output format."""
+    rows: list[dict[str, Any]] = []
+    for line in decoded.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        payload = json.loads(line)
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
+def normalize_podman_rows(
+    ps_rows: list[dict[str, Any]],
+    stats_rows: list[dict[str, Any]],
+) -> tuple[ContainerInfo, ...]:
+    stats_by_id = _index_stats(stats_rows)
+    return tuple(
+        _build_podman_container(row, stats_by_id)
+        for row in sorted(ps_rows, key=_podman_sort_key)
+    )
+
+
+def normalize_docker_rows(
+    ps_rows: list[dict[str, Any]],
+    stats_rows: list[dict[str, Any]],
+) -> tuple[ContainerInfo, ...]:
+    stats_by_id = _index_stats(stats_rows)
+    return tuple(
+        _build_docker_container(row, stats_by_id)
+        for row in sorted(ps_rows, key=_docker_sort_key)
     )
 
 
