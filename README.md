@@ -25,7 +25,8 @@ reads the touchscreen directly through Linux `evdev`.
   from the same touch-first interface, with a selector paged specifically for
   the 64×18 physical console.
 - **Host** — CPU, memory, disk and temperature at a glance.
-- **Services** — curated checks from containers, systemd, native CRUX rc.d,
+- **Services** — curated checks from containers, systemd, CRUX, HTTP or TCP,
+  paged at up to 12 services per screen on the reference 64×18 layout.
   HTTP or TCP, scoped to the selected node and paged at up to 12 services per
   screen on the reference layout.
 - **Storage** — filesystem capacity plus optional SMART disk health and detail.
