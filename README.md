@@ -1,6 +1,6 @@
 # TouchRack
 
-**A touch-first, modular homelab console for physical Linux TTY displays.**
+**A touch-first, multi-node homelab console for physical Linux TTY displays.**
 
 It is designed for small directly attached displays — the reference setup is a
 7-inch 1024×600 panel running as a **64×18 virtual console** — with no X11,
@@ -21,19 +21,34 @@ reads the touchscreen directly through Linux `evdev`.
 
 ## What it shows
 
+- **Multiple nodes** — monitor the local TouchRack host and remote Linux SBCs
+  from the same touch-first interface, with a selector paged specifically for
+  the 64×18 physical console.
 - **Host** — CPU, memory, disk and temperature at a glance.
-- **Services** — curated checks from containers, systemd, HTTP or TCP, paged at
-  up to 12 services per screen on the reference layout.
+- **Services** — curated checks from containers, systemd, native CRUX rc.d,
+  HTTP or TCP, scoped to the selected node and paged at up to 12 services per
+  screen on the reference layout.
 - **Storage** — filesystem capacity plus optional SMART disk health and detail.
-- **Containers** — Podman/Docker summary, resource hotspots and container detail.
-- **Diagnostics** — runtime display, touch, engine, services, config and sleep state.
-- **Multiple nodes** — switch between the local host and remote Linux SBCs
-  monitored read-only over hardened OpenSSH.
+- **Containers** — Podman/Docker summary, resource hotspots and container detail
+  for local or remote nodes.
+- **Diagnostics** — runtime display, touch, engine, services, config and sleep
+  state, plus the active node, transport, connectivity and container access mode.
+- **Resilient remote state** — per-node connectivity (`UP`, `DOWN` or `--`),
+  explicit `STALE` snapshots after transport failures and a shared SSH circuit
+  breaker that suppresses redundant retries while a node is unavailable.
 - **Touch wake guard** — the first touch wakes a blanked display without activating
-  the control underneath it.
+  the control underneath it; automatic collection is paused while the physical
+  display is blanked and resumes with one fresh active-node refresh.
 
 The UI automatically switches to the dedicated `compact-touch` layout on small
 terminals such as the reference **64×18** console.
+
+Remote SBCs do not need a TouchRack agent. HOST, STORAGE and CONTAINERS use
+portable Linux interfaces and fixed read-only commands over the same hardened
+OpenSSH transport used by node-scoped service providers. Optional narrowly
+privileged helpers extend this model to SMART data and root-owned containers
+without granting general `sudo`, Docker-group membership or arbitrary engine
+access.
 
 ## Requirements
 
@@ -214,11 +229,28 @@ nodes:
       known_hosts_file: /etc/touchrack/ssh/known_hosts
 ```
 
+The node selector is explicitly paginated for touch use on the 64×18 console:
+three nodes are shown per page with `PREV` / `NEXT` controls and a page
+indicator. Startup opens the page containing the active node rather than
+assuming the whole fleet can fit on screen.
+
 HOST, STORAGE, CONTAINERS and node-scoped SERVICES reuse the same node runtime
-and transport. Connectivity is shown as `UP`, `DOWN` or `--`; failed refreshes
-retain the last successful snapshot with an explicit `STALE` state. A shared
-circuit breaker prevents each capability from repeatedly opening its own SSH
-connection while a node is unavailable.
+and transport. Remote HOST collection is agentless and reads portable Linux
+interfaces such as `/proc`, `/sys`, `df` and `ip`. Remote SERVICES supports
+both `systemd` and native CRUX `/etc/rc.d/<service> status` providers, while
+CONTAINERS prefers Podman and falls back to Docker.
+
+Connectivity is tracked independently per node and shown as `UP`, `DOWN` or
+`--`. HOST, STORAGE and CONTAINERS retain their last successful snapshot after
+a transport failure and mark it explicitly as `STALE`, preserving the original
+collection time so its age continues to increase. A shared SSH circuit breaker
+prevents each capability from repeatedly opening its own connection while a
+node is unavailable and permits a single recovery probe after cooldown.
+
+When TouchRack blanks the physical display, scheduled collection is paused as
+well: no periodic SSH sessions are opened, missed intervals are not replayed,
+and waking the console triggers one immediate refresh for the active node
+before the normal interval resumes.
 
 See [`docs/REMOTE_NODES.md`](docs/REMOTE_NODES.md) for the complete secure
 provisioning procedure, capability matrix, CRUX examples and failure semantics.
