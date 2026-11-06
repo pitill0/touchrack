@@ -74,7 +74,7 @@ class SmartctlDiskHealthProvider:
                 available=False,
                 error="smartctl not installed",
             )
-        except OSError as exc:
+        except (OSError, subprocess.SubprocessError) as exc:
             return DiskHealthSnapshot(
                 disks=(),
                 collected_at=collected_at,
@@ -123,7 +123,7 @@ class SmartctlDiskHealthProvider:
 
             try:
                 result = self._run(*args)
-            except OSError as exc:
+            except (OSError, subprocess.SubprocessError) as exc:
                 errors.append(f"{name}: {exc}")
                 continue
 

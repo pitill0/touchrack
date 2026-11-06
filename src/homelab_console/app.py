@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from time import monotonic
 from pathlib import Path
 import subprocess
@@ -36,6 +37,7 @@ from homelab_console.providers import (
     SmartctlDiskHealthProvider,
     StorageProvider,
 )
+from homelab_console.models import DiskHealthSnapshot
 from homelab_console.nodes import (
     Node,
     NodeConnectivityRegistry,
@@ -533,14 +535,26 @@ class HomelabConsole(App[None]):
         self._update_node_selector()
         self.show_section("host")
         self.query_one(HostView).show_node_switching(runtime.node.title)
+        self.query_one(ContainersView).show_node_switching()
+        self.query_one(StorageView).show_node_switching()
+        self.query_one(ServicesView).show_node_switching()
         self._refresh_active_capabilities()
 
-    @work(exclusive=True, group="host-refresh")
+    @work(exclusive=True, group="host-refresh", exit_on_error=False)
     async def refresh_host(self) -> None:
         host_view = self.query_one(HostView)
         host_view.show_refreshing()
         runtime = self.active_node
-        snapshot = await runtime.host.collect()
+        try:
+            snapshot = await runtime.host.collect()
+        except Exception as exc:
+            # An unexpected host collection error must not leave the node online.
+            if self.active_node_id == runtime.node.id:
+                self.node_connectivity.record(
+                    runtime.node.id, error=str(exc)
+                )
+                host_view.show_refresh_error()
+            raise
         if self.active_node_id != runtime.node.id:
             return
         self.node_connectivity.record(runtime.node.id, error=snapshot.error)
@@ -549,12 +563,17 @@ class HomelabConsole(App[None]):
         )
         host_view.show_snapshot(snapshot)
 
-    @work(exclusive=True, group="containers-refresh")
+    @work(exclusive=True, group="containers-refresh", exit_on_error=False)
     async def refresh_containers(self) -> None:
         containers_view = self.query_one(ContainersView)
         containers_view.show_refreshing()
         runtime = self.active_node
-        snapshot = await runtime.containers.collect()
+        try:
+            snapshot = await runtime.containers.collect()
+        except Exception as exc:
+            if self.active_node_id == runtime.node.id:
+                containers_view.show_refresh_error(str(exc))
+            raise
         if self.active_node_id != runtime.node.id:
             return
         snapshot = self.node_snapshots.resolve(
@@ -564,13 +583,27 @@ class HomelabConsole(App[None]):
         containers_view.show_snapshot(snapshot)
         self.refresh_services()
 
-    @work(exclusive=True, group="storage-refresh")
+    @work(exclusive=True, group="storage-refresh", exit_on_error=False)
     async def refresh_storage(self) -> None:
         storage_view = self.query_one(StorageView)
         storage_view.show_refreshing()
         runtime = self.active_node
-        snapshot = await runtime.storage.collect()
-        disk_snapshot = await runtime.disk_health.collect()
+        try:
+            snapshot = await runtime.storage.collect()
+        except Exception as exc:
+            if self.active_node_id == runtime.node.id:
+                storage_view.show_refresh_error(str(exc))
+            raise
+        try:
+            disk_snapshot = await runtime.disk_health.collect()
+        except Exception as exc:  # noqa: BLE001
+            # Provider failures must not block filesystem collection.
+            disk_snapshot = DiskHealthSnapshot(
+                disks=(),
+                collected_at=datetime.now(UTC),
+                available=False,
+                error=str(exc),
+            )
         if self.active_node_id != runtime.node.id:
             return
         snapshot = self.node_snapshots.resolve(
@@ -579,13 +612,18 @@ class HomelabConsole(App[None]):
         storage_view.show_snapshot(snapshot)
         storage_view.show_disk_snapshot(disk_snapshot)
 
-    @work(exclusive=True, group="services-refresh")
+    @work(exclusive=True, group="services-refresh", exit_on_error=False)
     async def refresh_services(self) -> None:
         services_view = self.query_one(ServicesView)
         services_view.show_refreshing()
         runtime = self.active_node
         manager = self._services_manager(runtime)
-        snapshot = await manager.collect()
+        try:
+            snapshot = await manager.collect()
+        except Exception as exc:
+            if self.active_node_id == runtime.node.id:
+                services_view.show_refresh_error(str(exc))
+            raise
         if self.active_node_id != runtime.node.id:
             return
         services_view.show_snapshot(snapshot)

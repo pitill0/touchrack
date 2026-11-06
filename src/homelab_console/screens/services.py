@@ -162,11 +162,54 @@ class ServicesView(Vertical):
                 classes="services-page-button flat-control",
             )
 
+    def show_node_switching(self) -> None:
+        """Clear previous-node services and interactive card references."""
+        self.snapshot = None
+        self._visible_states = ()
+        self._page_states = ()
+        self._page = 0
+        self._render_page()
+
+        status = self.query_one("#services-status", Static)
+        status.remove_class(
+            "has-warning", "has-error", "has-config-error"
+        )
+        status.update("Loading configured services…")
+
+        health = self.query_one("#services-health", Static)
+        health.remove_class(
+            "healthy", "degraded", "unavailable", "config-error"
+        )
+        health.update("● --")
+
     def show_refreshing(self) -> None:
         if self.snapshot is None:
             status = self.query_one("#services-status", Static)
             status.update("Loading configured services…")
             status.remove_class("has-error", "has-warning")
+
+    def show_refresh_error(self, reason: str) -> None:
+        """Report collection failure without replacing the last snapshot."""
+        status = self.query_one("#services-status", Static)
+        health = self.query_one("#services-health", Static)
+
+        status.remove_class(
+            "has-error", "has-warning", "has-config-error"
+        )
+        health.remove_class(
+            "healthy", "degraded", "unavailable", "config-error"
+        )
+
+        if self.snapshot is None:
+            status.update(f"DOWN · {reason}")
+            status.add_class("has-error")
+            health.update("● DOWN")
+            health.add_class("unavailable")
+        else:
+            status.update(f"STALE · {reason}")
+            status.add_class("has-warning")
+            health.update("● STALE")
+            health.add_class("degraded")
 
     def show_snapshot(self, snapshot: ServicesSnapshot) -> None:
         self.snapshot = snapshot

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import http.client
 import os
 import math
 import re
@@ -301,6 +302,11 @@ class CruxServiceProvider:
             )
 
 
+class _NoRedirectHandler(urllib_request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class HttpServiceProvider:
     async def check(self, definition: ServiceDefinition) -> ServiceState:
         return await asyncio.to_thread(self._check_sync, definition)
@@ -312,8 +318,17 @@ class HttpServiceProvider:
         started = datetime.now(timezone.utc)
         try:
             req = urllib_request.Request(definition.target, method="GET")
-            with urllib_request.urlopen(req, timeout=timeout) as response:
-                code = int(response.status)
+            open_request = urllib_request.urlopen
+            if 300 <= expected < 400:
+                open_request = urllib_request.build_opener(
+                    _NoRedirectHandler()
+                ).open
+            try:
+                with open_request(req, timeout=timeout) as response:
+                    code = int(response.status)
+            except urllib_error.HTTPError as exc:
+                code = int(exc.code)
+                exc.close()
             latency_ms = max(0, round((datetime.now(timezone.utc) - started).total_seconds() * 1000))
             ok = code == expected
             return _state(
@@ -331,7 +346,13 @@ class HttpServiceProvider:
                     ("URL", definition.target),
                 ),
             )
-        except (urllib_error.URLError, TimeoutError, ValueError) as exc:
+        except (
+            urllib_error.URLError,
+            TimeoutError,
+            ValueError,
+            OSError,
+            http.client.HTTPException,
+        ) as exc:
             return _state(
                 definition,
                 "ERROR",

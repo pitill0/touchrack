@@ -314,6 +314,40 @@ class StorageView(Vertical):
                 classes="storage-page-button flat-control",
             )
 
+    def show_node_switching(self) -> None:
+        """Drop previous-node filesystem and SMART presentation state."""
+        self.snapshot = None
+        self.disk_snapshot = None
+        self._filesystem_refresh_error = None
+        self._all_filesystems = ()
+        self._visible_filesystems = ()
+        self._all_disks = ()
+        self._visible_disks = ()
+        self._page = 0
+
+        if not self._render_dom_ready():
+            return
+
+        for index in range(VISIBLE_FILESYSTEMS):
+            self.query_one(
+                f"#storage-open-{index}", FilesystemCard
+            ).set_filesystem(None)
+        for index in range(VISIBLE_DISKS):
+            self.query_one(
+                f"#storage-disk-open-{index}", DiskHealthCard
+            ).set_disk(None)
+
+        self._render_page()
+        self._update_mode_buttons()
+
+        status = self.query_one("#storage-status", Static)
+        status.remove_class("has-warning", "has-error")
+        status.update("Reading filesystems…")
+
+        health = self.query_one("#storage-health", Static)
+        health.remove_class("healthy", "degraded", "unavailable")
+        health.update("● --")
+
     def show_refreshing(self) -> None:
         if self.snapshot is None:
             status = self.query_one("#storage-status", Static)
@@ -346,8 +380,32 @@ class StorageView(Vertical):
 
         return all(len(self.query(selector)) == 1 for selector in required)
 
+    def show_refresh_error(self, reason: str) -> None:
+        """Report filesystem refresh failure without discarding previous data."""
+        self._filesystem_refresh_error = reason
+        if not self._render_dom_ready():
+            return
+
+        status = self.query_one("#storage-status", Static)
+        health = self.query_one("#storage-health", Static)
+        health.remove_class("healthy", "degraded", "unavailable")
+
+        if self.snapshot is None:
+            status.update(f"DOWN · {reason}")
+            status.remove_class("has-warning")
+            status.add_class("has-error")
+            health.update("● DOWN")
+            health.add_class("unavailable")
+        else:
+            status.update(f"STALE · {reason}")
+            status.remove_class("has-error")
+            status.add_class("has-warning")
+            health.update("● STALE")
+            health.add_class("degraded")
+
     def show_snapshot(self, snapshot: StorageSnapshot) -> None:
         self.snapshot = snapshot
+        self._filesystem_refresh_error = None
         self._all_filesystems = snapshot.filesystems
 
         # A provider worker may complete while Textual is tearing down the
@@ -429,6 +487,24 @@ class StorageView(Vertical):
         health = self.query_one("#storage-health", Static)
         health.remove_class("healthy", "degraded", "unavailable")
 
+        # SMART refreshes must not overwrite a failed filesystem state.
+        if getattr(self, "_filesystem_refresh_error", None) is not None:
+            health.update(
+                "● STALE" if self.snapshot is not None else "● DOWN"
+            )
+            health.add_class(
+                "degraded" if self.snapshot is not None else "unavailable"
+            )
+            return
+        if self.snapshot is not None and self.snapshot.error:
+            health.update("● DOWN")
+            health.add_class("unavailable")
+            return
+        if self.snapshot is not None and self.snapshot.stale:
+            health.update("● STALE")
+            health.add_class("degraded")
+            return
+
         if filesystem_critical is None or filesystem_warning is None:
             filesystems = self.snapshot.filesystems if self.snapshot else ()
             filesystem_critical = any(
@@ -472,7 +548,11 @@ class StorageView(Vertical):
         )
 
         status = self.query_one("#storage-status", Static)
-        if self.mode == "disks" and self.disk_snapshot is not None:
+        refresh_error = getattr(self, "_filesystem_refresh_error", None)
+        if refresh_error is not None:
+            prefix = "STALE" if self.snapshot is not None else "DOWN"
+            status.update(f"{prefix} · {refresh_error}")
+        elif self.mode == "disks" and self.disk_snapshot is not None:
             if not self.disk_snapshot.available:
                 status.update(self.disk_snapshot.error or "smartctl unavailable")
             elif self.disk_snapshot.error and not self.disk_snapshot.disks:

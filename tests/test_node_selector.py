@@ -1,19 +1,29 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import UTC, datetime, timezone
 
 import pytest
 
 from homelab_console.app import HomelabConsole
-from homelab_console.models import HostSnapshot
+from homelab_console.models import (
+    ContainersSnapshot,
+    HostSnapshot,
+    StorageSnapshot,
+)
 from homelab_console.nodes import Node, NodeRegistry, NodeRuntime
 from homelab_console.providers import (
     UnavailableContainersProvider,
     UnavailableDiskHealthProvider,
     UnavailableStorageProvider,
 )
-from homelab_console.screens import HostView, ServicesView
+from homelab_console.screens import (
+    ContainersView,
+    HostView,
+    ServicesView,
+    StorageView,
+)
 from homelab_console.transports import CommandResult
 
 
@@ -420,3 +430,328 @@ services:
             ("rpi3-sshd", "OK")
         ]
         assert ("/etc/rc.d/sshd", "status") in runner.commands
+
+
+
+@pytest.mark.asyncio
+async def test_late_previous_node_host_exception_cannot_pollute_active_node():
+    """A cancelled provider that raises must not affect the newly active node."""
+
+    class LateFailureHostProvider(HostProvider):
+        def __init__(self):
+            super().__init__("lokalix")
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+
+        async def collect(self):
+            self.calls += 1
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise RuntimeError("late previous-node host exception") from None
+
+    old_provider = LateFailureHostProvider()
+    app, _, _ = multi_node_app(old_provider)
+
+    async with app.run_test(size=(64, 18)) as pilot:
+        await asyncio.wait_for(old_provider.started.wait(), timeout=5)
+
+        app.select_node("rpi3")
+
+        await pilot.pause()
+        await pilot.pause()
+
+        assert app.active_node_id == "rpi3"
+        assert app.is_running
+
+        # The replaced worker is expected to be cancelled. Its exception
+        # cannot update the active node's connectivity or Host presentation.
+        assert old_provider.cancelled.is_set()
+
+        view = app.query_one(HostView)
+        assert view.snapshot is not None
+        assert view.snapshot.hostname == "rpi3"
+        assert str(app.query_one("#host-health").content) == "● OK"
+
+        current = app.node_connectivity.get("rpi3")
+        assert current.status == "online"
+        assert current.error is None
+
+        previous = app.node_connectivity.get("lokalix")
+        assert previous.status == "unknown"
+        assert previous.error is None
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("capability", "view_type", "status_selector"),
+    [
+        ("containers", ContainersView, "#containers-status"),
+        ("storage", StorageView, "#storage-status"),
+    ],
+)
+async def test_late_capability_exception_cannot_pollute_new_node(
+    capability, view_type, status_selector
+):
+    """Cancelled old-node collection must never publish to a new node."""
+
+    class LateFailureProvider:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+
+        async def collect(self):
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise RuntimeError(
+                    f"old-node-{capability}-failure"
+                ) from None
+
+    delayed = LateFailureProvider()
+    local = replace(
+        runtime("lokalix", "Lokalix", "local", HostProvider("lokalix")),
+        **{capability: delayed},
+    )
+    remote = runtime("rpi3", "Raspberry Pi 3", "ssh", HostProvider("rpi3"))
+    app = HomelabConsole(
+        nodes=NodeRegistry(
+            (local, remote),
+            default_node_id="lokalix",
+        ),
+        refresh_seconds=3600,
+        screen_blank_minutes=0,
+        touch_enabled=False,
+    )
+
+    async with app.run_test(size=(64, 18)) as pilot:
+        await asyncio.wait_for(delayed.started.wait(), timeout=5)
+
+        app.select_node("rpi3")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert delayed.cancelled.is_set()
+        assert app.active_node_id == "rpi3"
+        assert app.is_running
+
+        view = app.query_one(view_type)
+        assert view.snapshot is not None
+        assert view.snapshot.error == (
+            "Remote capability is not available yet"
+        )
+
+        status = str(app.query_one(status_selector).content)
+        assert f"old-node-{capability}-failure" not in status
+
+        assert app.query_one(HostView).snapshot.hostname == "rpi3"
+        assert app.node_connectivity.get("rpi3").status == "online"
+
+        if capability == "containers":
+            assert "lokalix" not in app._container_snapshots
+            assert "rpi3" in app._container_snapshots
+
+
+
+@pytest.mark.asyncio
+async def test_late_previous_node_services_exception_cannot_pollute_active_node():
+    """A cancelled old-node Services worker must not affect the new node."""
+    app, _, _ = multi_node_app()
+
+    async with app.run_test(size=(64, 18)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert app.active_node_id == "lokalix"
+        old_manager = app._services_manager(app.active_node)
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def late_failure():
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise RuntimeError("old-node-services-failure") from None
+
+        # Inject the failure only at the Services collection boundary,
+        # leaving the per-node manager registration intact.
+        old_manager.collect = late_failure
+        old_worker = app.refresh_services()
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        app.select_node("rpi3")
+
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert old_worker.is_cancelled or cancelled.is_set()
+        assert cancelled.is_set()
+        assert app.active_node_id == "rpi3"
+        assert app.is_running
+
+        view = app.query_one(ServicesView)
+        assert view.snapshot is not None
+        assert view.snapshot.error is None
+        assert view.snapshot.services == ()
+
+        status = str(app.query_one("#services-status").content)
+        health = str(app.query_one("#services-health").content)
+
+        assert "old-node-services-failure" not in status
+        assert "STALE" not in health
+        assert "DOWN" not in health
+
+        assert app.query_one(HostView).snapshot.hostname == "rpi3"
+        assert app.node_connectivity.get("rpi3").status == "online"
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("capability", "view_type", "health_selector"),
+    [
+        ("containers", ContainersView, "#containers-health"),
+        ("storage", StorageView, "#storage-health"),
+    ],
+)
+async def test_node_transition_failure_does_not_retain_previous_node_data(
+    capability, view_type, health_selector
+):
+    """A failed node B refresh cannot display the last snapshot of node A."""
+
+    class FixedProvider:
+        def __init__(self, snapshot):
+            self.snapshot = snapshot
+
+        async def collect(self):
+            return self.snapshot
+
+    class FailingProvider:
+        async def collect(self):
+            raise RuntimeError("node-b-collection-failure")
+
+    now = datetime.now(UTC)
+    snapshots = {
+        "containers": ContainersSnapshot(
+            containers=(),
+            collected_at=now,
+            engine="node-a-engine",
+        ),
+        "storage": StorageSnapshot(
+            filesystems=(),
+            collected_at=now,
+        ),
+    }
+
+    local = replace(
+        runtime("lokalix", "Lokalix", "local", HostProvider("lokalix")),
+        **{capability: FixedProvider(snapshots[capability])},
+    )
+    remote = replace(
+        runtime("rpi3", "Raspberry Pi 3", "ssh", HostProvider("rpi3")),
+        **{capability: FailingProvider()},
+    )
+
+    app = HomelabConsole(
+        nodes=NodeRegistry(
+            (local, remote),
+            default_node_id="lokalix",
+        ),
+        refresh_seconds=3600,
+        screen_blank_minutes=0,
+        touch_enabled=False,
+    )
+
+    async with app.run_test(size=(64, 18)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+
+        view = app.query_one(view_type)
+        previous = view.snapshot
+
+        assert previous is not None
+        assert previous.error is None
+
+        app.select_node("rpi3")
+
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert app.active_node_id == "rpi3"
+        assert app.is_running
+        assert app.query_one(HostView).snapshot.hostname == "rpi3"
+
+        # A snapshot from lokalix must not become STALE telemetry for rpi3.
+        assert view.snapshot is None
+        assert str(app.query_one(health_selector).content) == "● DOWN"
+
+
+
+@pytest.mark.asyncio
+async def test_node_switch_clears_previous_node_touch_references():
+    """Touch targets must never open previous-node details after switching."""
+    app, _, _ = multi_node_app()
+
+    async with app.run_test(size=(64, 18)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+
+        containers = app.query_one(ContainersView)
+        storage = app.query_one(StorageView)
+        services = app.query_one(ServicesView)
+
+        # Inject distinct old-node references into each detail lookup.
+        # Their identity matters; the model's payload is irrelevant here.
+        old_container = object()
+        old_filesystem = object()
+        old_disk = object()
+        old_service = object()
+
+        containers.displayed_containers = (old_container,)
+        storage._visible_filesystems = (old_filesystem,)
+        storage._visible_disks = (old_disk,)
+        services._page_states = (old_service,)
+
+        assert containers.container_for_button("container-open-0") is old_container
+        assert storage.filesystem_for_button("storage-open-0") is old_filesystem
+        assert storage.disk_for_button("storage-disk-open-0") is old_disk
+        assert services.state_for_button("service-open-0") is old_service
+
+        app.select_node("rpi3")
+
+        # Check synchronously: no worker result should be needed to clear
+        # old-node interactive references.
+        assert app.active_node_id == "rpi3"
+        assert containers.snapshot is None
+        assert storage.snapshot is None
+        assert storage.disk_snapshot is None
+        assert services.snapshot is None
+
+        assert containers.container_for_button("container-open-0") is None
+        assert storage.filesystem_for_button("storage-open-0") is None
+        assert storage.disk_for_button("storage-disk-open-0") is None
+        assert services.state_for_button("service-open-0") is None
+
+        assert containers.displayed_containers == ()
+        assert storage._visible_filesystems == ()
+        assert storage._visible_disks == ()
+        assert services._page_states == ()
+
+        assert str(app.query_one("#containers-health").content) == "● --"
+        assert str(app.query_one("#storage-health").content) == "● --"
+        assert str(app.query_one("#services-health").content) == "● --"
+
+        await pilot.pause()
+        await pilot.pause()
+        assert app.is_running

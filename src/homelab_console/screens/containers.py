@@ -346,6 +346,22 @@ class ContainersView(Vertical):
         yield Label("Waiting", id="containers-last-update")
         yield Vertical(id="containers-body")
 
+    def show_node_switching(self) -> None:
+        """Clear node-specific container data before a new collection."""
+        self.snapshot = None
+        self.displayed_containers = ()
+        self.list_page = 0
+        self._render_body()
+        self.update_snapshot_age()
+
+        status = self.query_one("#containers-status", Static)
+        status.remove_class("has-warning", "has-error")
+        status.update("Reading containers…")
+
+        health = self.query_one("#containers-health", Static)
+        health.remove_class("healthy", "degraded", "unavailable")
+        health.update("● --")
+
     def show_refreshing(self) -> None:
         if self.snapshot is None:
             self.query_one("#containers-status", Static).update("Reading containers…")
@@ -409,6 +425,25 @@ class ContainersView(Vertical):
             return self.displayed_containers[index]
         except (ValueError, IndexError):
             return None
+
+    def show_refresh_error(self, reason: str) -> None:
+        """Show collection failure while retaining the last valid snapshot."""
+        status = self.query_one("#containers-status", Static)
+        health = self.query_one("#containers-health", Static)
+        health.remove_class("healthy", "degraded", "unavailable")
+
+        if self.snapshot is None:
+            status.update(f"DOWN · {reason}")
+            status.remove_class("has-warning")
+            status.add_class("has-error")
+            health.update("● DOWN")
+            health.add_class("unavailable")
+        else:
+            status.update(f"STALE · {reason}")
+            status.remove_class("has-error")
+            status.add_class("has-warning")
+            health.update("● STALE")
+            health.add_class("degraded")
 
     def show_snapshot(self, snapshot: ContainersSnapshot) -> None:
         self.snapshot = snapshot

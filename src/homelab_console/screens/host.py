@@ -179,6 +179,20 @@ class HostView(Vertical):
         if snapshot.stale:
             self.query_one("#host-uptime", Label).update("STALE DATA")
 
+    def show_refresh_error(self) -> None:
+        """Mark host telemetry unavailable without discarding earlier metrics."""
+        health = self.query_one("#host-health", Static)
+        health.remove_class("healthy", "degraded", "unavailable")
+
+        if self.snapshot is None:
+            health.update("● DOWN")
+            health.add_class("unavailable")
+            self.query_one("#host-uptime", Label).update("HOST UNAVAILABLE")
+        else:
+            health.update("● STALE")
+            health.add_class("degraded")
+            self.query_one("#host-uptime", Label).update("STALE DATA")
+
     def show_node_switching(self, title: str) -> None:
         """Clear host identity while a newly selected node is collected."""
         self.snapshot = None
