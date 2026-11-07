@@ -7,6 +7,7 @@ import subprocess
 import threading
 
 from textual import events, work
+from textual.worker import Worker
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.widget import Widget
@@ -124,6 +125,8 @@ class HomelabConsole(App[None]):
             tuple(runtime.node.id for runtime in nodes)
         )
         self.node_snapshots = LastSuccessfulSnapshotStore()
+        # Only the latest refresh may publish per capability.
+        self._refresh_tokens: dict[str, object] = {}
         self.active_node_id = nodes.default.node.id
         self.refresh_seconds = normalize_refresh_interval(refresh_seconds)
         # Kept for compatibility with the earlier spike API; refresh is now global.
@@ -540,8 +543,16 @@ class HomelabConsole(App[None]):
         self.query_one(ServicesView).show_node_switching()
         self._refresh_active_capabilities()
 
-    @work(exclusive=True, group="host-refresh", exit_on_error=False)
-    async def refresh_host(self) -> None:
+    def refresh_host(self) -> Worker[None]:
+        """Invalidate older results before scheduling a worker."""
+        refresh_token = object()
+        self._refresh_tokens["host"] = refresh_token
+        return self._refresh_host_worker(refresh_token)
+
+    @work(
+        exclusive=True, group="host-refresh", name="refresh_host", exit_on_error=False
+    )
+    async def _refresh_host_worker(self, refresh_token: object) -> None:
         host_view = self.query_one(HostView)
         host_view.show_refreshing()
         runtime = self.active_node
@@ -549,13 +560,19 @@ class HomelabConsole(App[None]):
             snapshot = await runtime.host.collect()
         except Exception as exc:
             # An unexpected host collection error must not leave the node online.
-            if self.active_node_id == runtime.node.id:
+            if (
+                self.active_node_id == runtime.node.id
+                and self._refresh_tokens["host"] is refresh_token
+            ):
                 self.node_connectivity.record(
                     runtime.node.id, error=str(exc)
                 )
                 host_view.show_refresh_error()
             raise
-        if self.active_node_id != runtime.node.id:
+        if (
+            self.active_node_id != runtime.node.id
+            or self._refresh_tokens["host"] is not refresh_token
+        ):
             return
         self.node_connectivity.record(runtime.node.id, error=snapshot.error)
         snapshot = self.node_snapshots.resolve(
@@ -563,18 +580,35 @@ class HomelabConsole(App[None]):
         )
         host_view.show_snapshot(snapshot)
 
-    @work(exclusive=True, group="containers-refresh", exit_on_error=False)
-    async def refresh_containers(self) -> None:
+    def refresh_containers(self) -> Worker[None]:
+        """Invalidate older results before scheduling a worker."""
+        refresh_token = object()
+        self._refresh_tokens["containers"] = refresh_token
+        return self._refresh_containers_worker(refresh_token)
+
+    @work(
+        exclusive=True,
+        group="containers-refresh",
+        name="refresh_containers",
+        exit_on_error=False,
+    )
+    async def _refresh_containers_worker(self, refresh_token: object) -> None:
         containers_view = self.query_one(ContainersView)
         containers_view.show_refreshing()
         runtime = self.active_node
         try:
             snapshot = await runtime.containers.collect()
         except Exception as exc:
-            if self.active_node_id == runtime.node.id:
+            if (
+                self.active_node_id == runtime.node.id
+                and self._refresh_tokens["containers"] is refresh_token
+            ):
                 containers_view.show_refresh_error(str(exc))
             raise
-        if self.active_node_id != runtime.node.id:
+        if (
+            self.active_node_id != runtime.node.id
+            or self._refresh_tokens["containers"] is not refresh_token
+        ):
             return
         snapshot = self.node_snapshots.resolve(
             runtime.node.id, "containers", snapshot
@@ -583,15 +617,29 @@ class HomelabConsole(App[None]):
         containers_view.show_snapshot(snapshot)
         self.refresh_services()
 
-    @work(exclusive=True, group="storage-refresh", exit_on_error=False)
-    async def refresh_storage(self) -> None:
+    def refresh_storage(self) -> Worker[None]:
+        """Invalidate older results before scheduling a worker."""
+        refresh_token = object()
+        self._refresh_tokens["storage"] = refresh_token
+        return self._refresh_storage_worker(refresh_token)
+
+    @work(
+        exclusive=True,
+        group="storage-refresh",
+        name="refresh_storage",
+        exit_on_error=False,
+    )
+    async def _refresh_storage_worker(self, refresh_token: object) -> None:
         storage_view = self.query_one(StorageView)
         storage_view.show_refreshing()
         runtime = self.active_node
         try:
             snapshot = await runtime.storage.collect()
         except Exception as exc:
-            if self.active_node_id == runtime.node.id:
+            if (
+                self.active_node_id == runtime.node.id
+                and self._refresh_tokens["storage"] is refresh_token
+            ):
                 storage_view.show_refresh_error(str(exc))
             raise
         try:
@@ -604,7 +652,10 @@ class HomelabConsole(App[None]):
                 available=False,
                 error=str(exc),
             )
-        if self.active_node_id != runtime.node.id:
+        if (
+            self.active_node_id != runtime.node.id
+            or self._refresh_tokens["storage"] is not refresh_token
+        ):
             return
         snapshot = self.node_snapshots.resolve(
             runtime.node.id, "storage", snapshot
@@ -612,8 +663,19 @@ class HomelabConsole(App[None]):
         storage_view.show_snapshot(snapshot)
         storage_view.show_disk_snapshot(disk_snapshot)
 
-    @work(exclusive=True, group="services-refresh", exit_on_error=False)
-    async def refresh_services(self) -> None:
+    def refresh_services(self) -> Worker[None]:
+        """Invalidate older results before scheduling a worker."""
+        refresh_token = object()
+        self._refresh_tokens["services"] = refresh_token
+        return self._refresh_services_worker(refresh_token)
+
+    @work(
+        exclusive=True,
+        group="services-refresh",
+        name="refresh_services",
+        exit_on_error=False,
+    )
+    async def _refresh_services_worker(self, refresh_token: object) -> None:
         services_view = self.query_one(ServicesView)
         services_view.show_refreshing()
         runtime = self.active_node
@@ -621,10 +683,16 @@ class HomelabConsole(App[None]):
         try:
             snapshot = await manager.collect()
         except Exception as exc:
-            if self.active_node_id == runtime.node.id:
+            if (
+                self.active_node_id == runtime.node.id
+                and self._refresh_tokens["services"] is refresh_token
+            ):
                 services_view.show_refresh_error(str(exc))
             raise
-        if self.active_node_id != runtime.node.id:
+        if (
+            self.active_node_id != runtime.node.id
+            or self._refresh_tokens["services"] is not refresh_token
+        ):
             return
         services_view.show_snapshot(snapshot)
 
