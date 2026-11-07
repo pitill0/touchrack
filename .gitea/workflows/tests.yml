@@ -1,0 +1,76 @@
+name: TouchRack CRUX CI
+
+on:
+  push:
+    branches:
+      - main
+      - ci/gitea-crux-runner
+
+permissions:
+  contents: read
+
+jobs:
+  crux-python312:
+    name: CRUX Python 3.12
+    runs-on: touchrack-crux
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Test and validate wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/touchrack-ci.XXXXXXXX")"
+          trap 'rm -rf "$TEMP_ROOT"' EXIT
+
+          export UV_CACHE_DIR="$TEMP_ROOT/uv-cache"
+          export UV_NO_PROGRESS=1
+
+          uv venv --python /usr/bin/python3.12 "$TEMP_ROOT/venv"
+          PYTHON="$TEMP_ROOT/venv/bin/python"
+
+          uv pip install --python "$PYTHON" -e '.[dev]'
+
+          "$PYTHON" -m pytest -q
+
+          uv build --wheel --out-dir "$TEMP_ROOT/dist" .
+
+          "$PYTHON" - "$TEMP_ROOT/dist" <<'PY'
+          import sys
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheels = list(Path(sys.argv[1]).glob("touchrack-*.whl"))
+          assert len(wheels) == 1, wheels
+
+          with ZipFile(wheels[0]) as wheel:
+              names = set(wheel.namelist())
+
+          required = {
+              "homelab_console/console.tcss",
+              "homelab_console/nodes/runtime.py",
+              "homelab_console/transports/ssh.py",
+              "homelab_console/providers/remote.py",
+              "homelab_console/providers/remote_storage.py",
+              "homelab_console/providers/remote_containers.py",
+              "homelab_console/providers/remote_disk_health.py",
+          }
+
+          assert required <= names, sorted(required - names)
+          assert not any(name.startswith("tests/") for name in names)
+          assert not any(name.endswith("config.yaml") for name in names)
+
+          print("PASS: wheel contents validated")
+          PY
+
+          uv pip install --python "$PYTHON" --no-deps \
+            --reinstall "$TEMP_ROOT"/dist/touchrack-*.whl
+
+          "$PYTHON" -c \
+            'import homelab_console; assert homelab_console.__version__ == "5.0.0"'
+
+          echo "PASS: CRUX tests, wheel audit and smoke test"
