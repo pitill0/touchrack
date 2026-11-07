@@ -38,6 +38,8 @@ class CircuitBreakerCommandRunner:
         self.failure_types = failure_types
         self.clock = clock
         self._open_until: float | None = None
+        self._failure_generation = 0
+        self._recovery_generation = 0
         self._probe_lock = asyncio.Lock()
 
     async def run(
@@ -69,10 +71,21 @@ class CircuitBreakerCommandRunner:
         *,
         timeout: float | None,
     ) -> CommandResult:
+        failure_generation = self._failure_generation
+        recovery_generation = self._recovery_generation
         try:
             result = await self.runner.run(command, timeout=timeout)
         except self.failure_types:
-            self._open_until = self.clock() + self.cooldown_seconds
+            # Failures from before a completed recovery must still
+            # reach the caller, but cannot reopen the recovered circuit.
+            if recovery_generation == self._recovery_generation:
+                self._failure_generation += 1
+                self._open_until = self.clock() + self.cooldown_seconds
             raise
-        self._open_until = None
+
+        # A success preceding a newer failure is not proof of recovery.
+        if failure_generation == self._failure_generation:
+            if self._open_until is not None:
+                self._recovery_generation += 1
+            self._open_until = None
         return result

@@ -53,4 +53,21 @@ async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:
         process.kill()
     except ProcessLookupError:
         pass
-    await process.communicate()
+
+    # A second cancellation must not abandon subprocess reaping.
+    # Shielding alone is insufficient: the caller still receives
+    # CancelledError and must continue waiting for cleanup.
+    reap_task = asyncio.create_task(process.communicate())
+    cancelled_during_cleanup = False
+
+    while not reap_task.done():
+        try:
+            await asyncio.shield(reap_task)
+        except asyncio.CancelledError:
+            cancelled_during_cleanup = True
+
+    # Surface any cleanup failure rather than silently discarding it.
+    await reap_task
+
+    if cancelled_during_cleanup:
+        raise asyncio.CancelledError
