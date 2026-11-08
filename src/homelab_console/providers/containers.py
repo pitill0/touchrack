@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from homelab_console.models import ContainerInfo, ContainersSnapshot
-from homelab_console.transports.process import _kill_and_reap
+from homelab_console.transports.process import _kill_and_reap, _spawn_owned
 
 
 class CliContainersProvider:
@@ -18,16 +18,48 @@ class CliContainersProvider:
     def __init__(self, command: str, timeout_seconds: float = 5.0) -> None:
         self.command = command
         self.timeout_seconds = timeout_seconds
+        self._active_runs: set[asyncio.Task] = set()
+        self._closing = False
 
     async def collect(self) -> ContainersSnapshot:
         raise NotImplementedError
 
+    async def shutdown(self) -> None:
+        """Cancel and drain every running local CLI operation."""
+        self._closing = True
+        current = asyncio.current_task()
+        pending = tuple(
+            task for task in self._active_runs
+            if task is not current and not task.done()
+        )
+
+        for task in pending:
+            task.cancel()
+
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
     async def _run(self, *args: str) -> str:
-        process = await asyncio.create_subprocess_exec(
+        if self._closing:
+            raise asyncio.CancelledError
+
+        task = asyncio.current_task()
+        if task is not None:
+            self._active_runs.add(task)
+
+        try:
+            return await self._run_command(*args)
+        finally:
+            if task is not None:
+                self._active_runs.discard(task)
+
+    async def _run_command(self, *args: str) -> str:
+        process = await _spawn_owned(
             self.command,
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -35,9 +67,7 @@ class CliContainersProvider:
             )
         except asyncio.TimeoutError as exc:
             await _kill_and_reap(process)
-            raise TimeoutError(
-                f"command exceeded {self.timeout_seconds:.0f}s"
-            ) from exc
+            raise TimeoutError(f"command exceeded {self.timeout_seconds:.0f}s") from exc
         except asyncio.CancelledError:
             # Textual's exclusive refresh workers cancel the previous coroutine.
             # Cancellation of communicate() does not terminate the child process.
@@ -45,10 +75,12 @@ class CliContainersProvider:
             raise
 
         if process.returncode != 0:
-            message = stderr.decode(errors="replace").strip() or f"unknown {self.engine} error"
+            message = (
+                stderr.decode(errors="replace").strip()
+                or f"unknown {self.engine} error"
+            )
             raise RuntimeError(message)
         return stdout.decode(errors="replace").strip()
-
 
 
 class PodmanContainersProvider(CliContainersProvider):
@@ -64,9 +96,15 @@ class PodmanContainersProvider(CliContainersProvider):
         try:
             ps_rows = await self._run_json_list("ps", "--all", "--format", "json")
         except FileNotFoundError:
-            return _unavailable(collected_at, self.engine, "Podman is not installed or is not available in PATH")
+            return _unavailable(
+                collected_at,
+                self.engine,
+                "Podman is not installed or is not available in PATH",
+            )
         except (TimeoutError, RuntimeError, json.JSONDecodeError) as exc:
-            return _unavailable(collected_at, self.engine, f"Unable to read Podman containers: {exc}")
+            return _unavailable(
+                collected_at, self.engine, f"Unable to read Podman containers: {exc}"
+            )
 
         stats_rows: list[dict[str, Any]] = []
         stats_error: str | None = None
@@ -105,9 +143,15 @@ class DockerContainersProvider(CliContainersProvider):
                 "ps", "--all", "--no-trunc", "--format", "{{json .}}"
             )
         except FileNotFoundError:
-            return _unavailable(collected_at, self.engine, "Docker is not installed or is not available in PATH")
+            return _unavailable(
+                collected_at,
+                self.engine,
+                "Docker is not installed or is not available in PATH",
+            )
         except (TimeoutError, RuntimeError, json.JSONDecodeError) as exc:
-            return _unavailable(collected_at, self.engine, f"Unable to read Docker containers: {exc}")
+            return _unavailable(
+                collected_at, self.engine, f"Unable to read Docker containers: {exc}"
+            )
 
         stats_rows: list[dict[str, Any]] = []
         stats_error: str | None = None
@@ -150,6 +194,13 @@ class AutoContainersProvider:
             return DockerContainersProvider(timeout_seconds=self.timeout_seconds)
         return None
 
+    async def shutdown(self) -> None:
+        """Drain the selected Podman or Docker provider."""
+        if self.provider is not None:
+            shutdown = getattr(self.provider, "shutdown", None)
+            if callable(shutdown):
+                await shutdown()
+
     async def collect(self) -> ContainersSnapshot:
         if self.provider is None:
             return ContainersSnapshot(
@@ -161,7 +212,9 @@ class AutoContainersProvider:
         return await self.provider.collect()
 
 
-def _unavailable(collected_at: datetime, engine: str, message: str) -> ContainersSnapshot:
+def _unavailable(
+    collected_at: datetime, engine: str, message: str
+) -> ContainersSnapshot:
     return ContainersSnapshot(
         containers=(), collected_at=collected_at, engine=engine, error=message
     )
@@ -227,7 +280,9 @@ def _index_stats(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return indexed
 
 
-def _matching_stats(identifier: str, stats_by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def _matching_stats(
+    identifier: str, stats_by_id: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
     return next(
         (
             value
