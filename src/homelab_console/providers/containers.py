@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from homelab_console.models import ContainerInfo, ContainersSnapshot
+from homelab_console.transports.process import _kill_and_reap
 
 
 class CliContainersProvider:
@@ -48,15 +49,6 @@ class CliContainersProvider:
             raise RuntimeError(message)
         return stdout.decode(errors="replace").strip()
 
-
-
-async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:
-    """Terminate and reap a CLI child process, tolerating an already-exited child."""
-    try:
-        process.kill()
-    except ProcessLookupError:
-        pass
-    await process.communicate()
 
 
 class PodmanContainersProvider(CliContainersProvider):

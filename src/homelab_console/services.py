@@ -18,6 +18,7 @@ import yaml
 
 from homelab_console.models import ContainersSnapshot
 from homelab_console.transports import CommandRunner
+from homelab_console.transports.process import _kill_and_reap
 
 
 SERVICE_STATUSES = ("OK", "IDLE", "WARN", "ERROR", "UNKNOWN")
@@ -133,15 +134,6 @@ class ContainerSnapshotServiceProvider:
             details=details,
         )
 
-
-
-async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:
-    """Terminate and reap a subprocess after timeout or task cancellation."""
-    try:
-        process.kill()
-    except ProcessLookupError:
-        pass
-    await process.communicate()
 
 
 class SystemdServiceProvider:
@@ -307,9 +299,36 @@ class _NoRedirectHandler(urllib_request.HTTPRedirectHandler):
         return None
 
 
-class HttpServiceProvider:
+class _ThreadedServiceChecks:
+    """Own synchronous checks after their async callers are cancelled."""
+
+    def __init__(self) -> None:
+        self._thread_checks: set[asyncio.Task[ServiceState]] = set()
+
+    async def _run_thread_check(
+        self, check_sync, definition: ServiceDefinition
+    ) -> ServiceState:
+        task = asyncio.create_task(asyncio.to_thread(check_sync, definition))
+        self._thread_checks.add(task)
+        task.add_done_callback(self._forget_thread_check)
+        return await asyncio.shield(task)
+
+    def _forget_thread_check(self, task: asyncio.Task[ServiceState]) -> None:
+        self._thread_checks.discard(task)
+        if not task.cancelled():
+            # Retrieve failures even if the requesting worker disappeared.
+            task.exception()
+
+    async def shutdown(self) -> None:
+        """Wait for outstanding synchronous checks to finish."""
+        tasks = tuple(self._thread_checks)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
+class HttpServiceProvider(_ThreadedServiceChecks):
     async def check(self, definition: ServiceDefinition) -> ServiceState:
-        return await asyncio.to_thread(self._check_sync, definition)
+        return await self._run_thread_check(self._check_sync, definition)
 
     def _check_sync(self, definition: ServiceDefinition) -> ServiceState:
         checked_at = datetime.now(timezone.utc)
@@ -368,9 +387,9 @@ class HttpServiceProvider:
             )
 
 
-class TcpServiceProvider:
+class TcpServiceProvider(_ThreadedServiceChecks):
     async def check(self, definition: ServiceDefinition) -> ServiceState:
-        return await asyncio.to_thread(self._check_sync, definition)
+        return await self._run_thread_check(self._check_sync, definition)
 
     def _check_sync(self, definition: ServiceDefinition) -> ServiceState:
         checked_at = datetime.now(timezone.utc)
@@ -753,6 +772,24 @@ class ServicesManager:
             task.add_done_callback(self._clear_collect_task)
 
         return await asyncio.shield(task)
+
+    async def shutdown(self) -> None:
+        """Reap cancellable checks, then drain HTTP/TCP worker threads."""
+        task = self._collect_task
+        if task is not None and not task.done():
+            task.cancel()
+            # Await cooperative cleanup, including subprocess reaping.
+            await asyncio.gather(task, return_exceptions=True)
+
+        threaded = {
+            id(provider): provider
+            for provider in self.providers.values()
+            if isinstance(provider, _ThreadedServiceChecks)
+        }
+        if threaded:
+            await asyncio.gather(
+                *(provider.shutdown() for provider in threaded.values())
+            )
 
     def _clear_collect_task(self, task: asyncio.Task[ServicesSnapshot]) -> None:
         if self._collect_task is task:

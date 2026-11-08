@@ -33,6 +33,12 @@ class LocalHostProvider:
     async def _collect_once(self) -> HostSnapshot:
         return await asyncio.to_thread(self._collect_sync)
 
+    async def shutdown(self) -> None:
+        """Wait for cooperative collection without abandoning its work."""
+        task = self._collect_task
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+
     def _clear_collect_task(self, task: asyncio.Task[HostSnapshot]) -> None:
         if self._collect_task is task:
             self._collect_task = None
