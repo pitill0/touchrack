@@ -62,6 +62,12 @@ class SmartctlDiskHealthProvider:
         self._cached_at = monotonic()
         return snapshot
 
+    async def shutdown(self) -> None:
+        """Wait for cooperative collection without abandoning its work."""
+        task = self._inflight
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+
     def _collect_sync(self) -> DiskHealthSnapshot:
         collected_at = datetime.now(timezone.utc)
 

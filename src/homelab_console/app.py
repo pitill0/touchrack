@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from datetime import UTC, datetime
 from time import monotonic
 from pathlib import Path
@@ -36,6 +38,7 @@ from homelab_console.providers import (
     LocalHostProvider,
     LocalStorageProvider,
     SmartctlDiskHealthProvider,
+    RemoteSmartctlDiskHealthProvider,
     StorageProvider,
 )
 from homelab_console.models import DiskHealthSnapshot
@@ -248,9 +251,48 @@ class HomelabConsole(App[None]):
         self._update_refresh_controls()
         self._update_screen_blank_controls()
 
-    def on_unmount(self) -> None:
+    async def on_unmount(self) -> None:
         if self.touch_reader is not None:
             self.touch_reader.stop()
+
+        # Shutdown covers all nodes, including the inactive ones.
+        managers = tuple(self._services_managers.values())
+        hosts = {
+            id(runtime.host): runtime.host
+            for runtime in self.nodes
+            if isinstance(runtime.host, LocalHostProvider)
+        }
+        storages = {
+            id(runtime.storage): runtime.storage
+            for runtime in self.nodes
+            if isinstance(runtime.storage, LocalStorageProvider)
+        }
+        smart_providers = {
+            id(runtime.disk_health): runtime.disk_health
+            for runtime in self.nodes
+            if isinstance(runtime.disk_health, SmartctlDiskHealthProvider)
+        }
+        remote_smart_providers = {
+            id(runtime.disk_health): runtime.disk_health
+            for runtime in self.nodes
+            if isinstance(
+                runtime.disk_health, RemoteSmartctlDiskHealthProvider
+            )
+        }
+
+        if managers or hosts or storages or smart_providers or remote_smart_providers:
+            results = await asyncio.gather(
+                *(manager.shutdown() for manager in managers),
+                *(host.shutdown() for host in hosts.values()),
+                *(storage.shutdown() for storage in storages.values()),
+                *(smart.shutdown() for smart in smart_providers.values()),
+                *(smart.shutdown() for smart in remote_smart_providers.values()),
+                return_exceptions=True,
+            )
+            # Finish every shutdown before propagating an isolated failure.
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
 
     def _start_touch_reader(self) -> None:
         diagnostic = self.query_one("#touch-diagnostic", Static)
