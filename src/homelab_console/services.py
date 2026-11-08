@@ -18,7 +18,7 @@ import yaml
 
 from homelab_console.models import ContainersSnapshot
 from homelab_console.transports import CommandRunner
-from homelab_console.transports.process import _kill_and_reap
+from homelab_console.transports.process import _kill_and_reap, _spawn_owned
 
 
 SERVICE_STATUSES = ("OK", "IDLE", "WARN", "ERROR", "UNKNOWN")
@@ -143,12 +143,13 @@ class SystemdServiceProvider:
     async def check(self, definition: ServiceDefinition) -> ServiceState:
         checked_at = datetime.now(timezone.utc)
         try:
-            process = await asyncio.create_subprocess_exec(
+            process = await _spawn_owned(
                 "systemctl",
                 "is-active",
                 definition.target,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(

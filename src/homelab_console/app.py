@@ -262,6 +262,11 @@ class HomelabConsole(App[None]):
             for runtime in self.nodes
             if isinstance(runtime.host, LocalHostProvider)
         }
+        containers = {
+            id(runtime.containers): runtime.containers
+            for runtime in self.nodes
+            if callable(getattr(runtime.containers, "shutdown", None))
+        }
         storages = {
             id(runtime.storage): runtime.storage
             for runtime in self.nodes
@@ -280,10 +285,14 @@ class HomelabConsole(App[None]):
             )
         }
 
-        if managers or hosts or storages or smart_providers or remote_smart_providers:
+        if (
+            managers or hosts or containers or storages
+            or smart_providers or remote_smart_providers
+        ):
             results = await asyncio.gather(
                 *(manager.shutdown() for manager in managers),
                 *(host.shutdown() for host in hosts.values()),
+                *(provider.shutdown() for provider in containers.values()),
                 *(storage.shutdown() for storage in storages.values()),
                 *(smart.shutdown() for smart in smart_providers.values()),
                 *(smart.shutdown() for smart in remote_smart_providers.values()),
