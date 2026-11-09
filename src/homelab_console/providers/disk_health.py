@@ -72,7 +72,7 @@ class SmartctlDiskHealthProvider:
         collected_at = datetime.now(timezone.utc)
 
         try:
-            scan = self._run("--scan-open", "-j")
+            scan = self._run("--scan", "-j")
         except FileNotFoundError:
             return DiskHealthSnapshot(
                 disks=(),
@@ -122,7 +122,7 @@ class SmartctlDiskHealthProvider:
 
         for name in selected_devices:
             scan_entry = scan_by_name.get(name, {})
-            args = ["-a", "-j", name]
+            args = ["-a", "-n", "standby,3", "-j", name]
             device_type = str(scan_entry.get("type") or "").strip()
             if device_type:
                 args.extend(["-d", device_type])
@@ -137,6 +137,19 @@ class SmartctlDiskHealthProvider:
                 payload = json.loads(result.stdout or "{}")
             except json.JSONDecodeError:
                 errors.append(f"{name}: invalid JSON")
+                continue
+
+            if _is_standby_response(payload, result.returncode):
+                disks.append(_standby_disk(name))
+                continue
+
+            # Exit 3 alone is not proof of standby: it can also indicate
+            # a device-opening problem. Preserve useful regular SMART
+            # JSON but do not invent a disk from diagnostics alone.
+            if result.returncode == 3 and not isinstance(
+                payload.get("device"), dict
+            ):
+                errors.append(f"{name}: smartctl failed without standby confirmation")
                 continue
 
             disks.append(_disk_from_json(payload, fallback_device=name))
@@ -161,6 +174,42 @@ class SmartctlDiskHealthProvider:
             check=False,
             timeout=12,
         )
+
+
+
+def _is_standby_response(payload: dict[str, Any], returncode: int) -> bool:
+    """Require both the configured exit code and SMART's standby diagnostic."""
+    if returncode != 3:
+        return False
+
+    metadata = payload.get("smartctl")
+    if not isinstance(metadata, dict):
+        return False
+
+    messages = metadata.get("messages")
+    if not isinstance(messages, list):
+        return False
+
+    return any(
+        isinstance(message, dict)
+        and "standby" in str(message.get("string") or "").casefold()
+        for message in messages
+    )
+
+
+def _standby_disk(device: str) -> DiskHealthInfo:
+    """A sleeping disk has not been health-checked; never infer SMART OK."""
+    return DiskHealthInfo(
+        device=device,
+        name=Path(device).name or device,
+        model=None,
+        serial=None,
+        protocol=None,
+        size=None,
+        temperature_c=None,
+        smart_passed=None,
+        standby=True,
+    )
 
 
 def _disk_from_json(payload: dict[str, Any], fallback_device: str) -> DiskHealthInfo:

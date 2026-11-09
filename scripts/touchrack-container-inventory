@@ -28,15 +28,28 @@ else
 fi
 printf 'ps_end\n'
 
+# Capture stderr separately so successful JSON is never polluted by
+# warnings from Podman or Docker. Retain diagnostics on failed stats.
+stats_stderr_file=$(mktemp "${TMPDIR:-/tmp}/touchrack-stats.XXXXXXXX")
+trap 'rm -f "$stats_stderr_file"' 0
+
 set +e
 if [ "$engine" = Podman ]; then
-    stats_output=$(podman stats --all --no-stream --format json 2>&1)
+    stats_output=$(podman stats --all --no-stream --format json 2>"$stats_stderr_file")
     stats_status=$?
 else
-    stats_output=$(docker stats --all --no-stream --format '{{json .}}' 2>&1)
+    stats_output=$(docker stats --all --no-stream --format '{{json .}}' 2>"$stats_stderr_file")
     stats_status=$?
 fi
 set -e
+
+if [ "$stats_status" -ne 0 ]; then
+    if [ -s "$stats_stderr_file" ]; then
+        stats_output=$(printf '%s\\n%s' "$stats_output" "$(cat "$stats_stderr_file")")
+    fi
+elif [ -s "$stats_stderr_file" ]; then
+    cat "$stats_stderr_file" >&2
+fi
 
 printf 'stats_status=%s\n' "$stats_status"
 printf 'stats_begin\n'

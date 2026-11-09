@@ -114,6 +114,7 @@ class DiskHealthInfo:
     unsafe_shutdowns: int | None = None
     media_errors: int | None = None
     details: tuple[tuple[str, str], ...] = ()
+    standby: bool = False
 
 
 @dataclass(frozen=True, slots=True)

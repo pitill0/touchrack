@@ -6,7 +6,11 @@ from datetime import datetime, timezone
 from time import monotonic
 
 from homelab_console.models import DiskHealthSnapshot
-from homelab_console.providers.disk_health import _disk_from_json
+from homelab_console.providers.disk_health import (
+    _disk_from_json,
+    _is_standby_response,
+    _standby_disk,
+)
 from homelab_console.transports import CommandRunner
 
 
@@ -70,7 +74,18 @@ class RemoteSmartctlDiskHealthProvider:
                 if not isinstance(payload, dict) or not payload:
                     detail = result.stderr.strip() or f"exit status {result.returncode}"
                     raise ValueError(detail)
-                disks.append(_disk_from_json(payload, fallback_device=device))
+                if _is_standby_response(payload, result.returncode):
+                    disks.append(_standby_disk(device))
+                elif result.returncode == 3 and not isinstance(
+                    payload.get("device"), dict
+                ):
+                    raise ValueError(
+                        "smartctl failed without standby confirmation"
+                    )
+                else:
+                    disks.append(
+                        _disk_from_json(payload, fallback_device=device)
+                    )
             except Exception as exc:
                 errors.append(f"{device}: {exc}")
         return DiskHealthSnapshot(

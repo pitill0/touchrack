@@ -63,11 +63,131 @@ copy_initial_config() {
 RUNTIME_PARENT=$(dirname "$RUNTIME_DIR")
 BUILD_DIR="$RUNTIME_PARENT/.touchrack-build.$$"
 OLD_DIR="$RUNTIME_PARENT/.touchrack-old.$$"
+UNIT_BACKUP="$RUNTIME_PARENT/.touchrack-unit.$$"
+INSTALL_LOCK="$RUNTIME_PARENT/.touchrack-install.lock"
+
+# Preserve the previous runtime until installation is committed.
+DEPLOYMENT_STARTED=0
+DEPLOYMENT_COMMITTED=0
+HAD_RUNTIME=0
+HAD_SERVICE_UNIT=0
+UNIT_REPLACEMENT_STARTED=0
+LOCK_ACQUIRED=0
+BUILD_OWNED=0
+
+rollback_runtime() {
+    if [ -d "$OLD_DIR" ]; then
+        rm -rf "$RUNTIME_DIR" || return 1
+        mv "$OLD_DIR" "$RUNTIME_DIR" || return 1
+    elif [ "$HAD_RUNTIME" -eq 0 ]; then
+        # First installation: discard an incomplete runtime.
+        rm -rf "$RUNTIME_DIR" || return 1
+    fi
+}
+
+rollback_service_unit() {
+    if [ "$UNIT_REPLACEMENT_STARTED" -eq 0 ]; then
+        return 0
+    fi
+
+    if [ "$HAD_SERVICE_UNIT" -eq 1 ]; then
+        # Retain the backup if restoring the unit fails.
+        cp -p "$UNIT_BACKUP" "$SERVICE_PATH" || return 1
+    else
+        # The unit did not exist before this installation.
+        rm -f "$SERVICE_PATH" || return 1
+    fi
+
+    # Refresh systemd's view after restoring the previous unit.
+    systemctl daemon-reload || return 1
+}
 
 cleanup() {
-    rm -rf "$BUILD_DIR"
+    status=$?
+    trap - EXIT HUP INT TERM
+
+    if [ "$DEPLOYMENT_STARTED" -eq 1 ] &&
+       [ "$DEPLOYMENT_COMMITTED" -eq 0 ]; then
+        if ! rollback_runtime; then
+            echo "ERROR: rollback failed; inspect $OLD_DIR" >&2
+            status=1
+        fi
+    fi
+
+    # Restore the systemd unit as part of the same transaction.
+    if [ "$DEPLOYMENT_STARTED" -eq 1 ] &&
+       [ "$DEPLOYMENT_COMMITTED" -eq 0 ]; then
+        if ! rollback_service_unit; then
+            echo "ERROR: systemd unit rollback failed; inspect $UNIT_BACKUP" >&2
+            status=1
+        else
+            rm -f "$UNIT_BACKUP" || status=1
+        fi
+    fi
+
+    # Never remove a build directory owned by another process.
+    if [ "$BUILD_OWNED" -eq 1 ]; then
+        if ! rm -rf "$BUILD_DIR"; then
+            status=1
+        fi
+    fi
+
+    # Only the process that acquired the lock may release it.
+    if [ "$LOCK_ACQUIRED" -eq 1 ]; then
+        if ! rmdir "$INSTALL_LOCK"; then
+            echo "ERROR: could not release install lock: $INSTALL_LOCK" >&2
+            status=1
+        fi
+    fi
+
+    exit "$status"
 }
-trap cleanup EXIT HUP INT TERM
+
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# The lock covers the service check and the entire deployment.
+install -d -o root -g root -m 0755 "$RUNTIME_PARENT"
+
+if ! mkdir "$INSTALL_LOCK"; then
+    echo "ERROR: installation already locked: $INSTALL_LOCK" >&2
+    echo "Inspect an existing/stale lock before retrying." >&2
+    exit 1
+fi
+LOCK_ACQUIRED=1
+
+# A prior run may have been killed without executing EXIT cleanup.
+# Do not deploy over a potentially incomplete or unrecovered installation.
+# The lock is held while checking these artifact names.
+for recovery_artifact in \
+    "$RUNTIME_PARENT"/.touchrack-old.* \
+    "$RUNTIME_PARENT"/.touchrack-unit.* \
+    "$RUNTIME_PARENT"/.touchrack-build.*
+do
+    if [ -e "$recovery_artifact" ] || [ -L "$recovery_artifact" ]; then
+        echo "ERROR: unresolved previous installation artifact: $recovery_artifact" >&2
+        echo "Inspect and recover it manually before retrying." >&2
+        exit 1
+    fi
+done
+
+# Never destroy recovery artifacts from a previous interrupted run.
+if [ -e "$BUILD_DIR" ] || [ -L "$BUILD_DIR" ]; then
+    echo "ERROR: existing build artifact: $BUILD_DIR" >&2
+    exit 1
+fi
+
+if [ -e "$OLD_DIR" ] || [ -L "$OLD_DIR" ]; then
+    echo "ERROR: existing runtime backup: $OLD_DIR" >&2
+    exit 1
+fi
+
+if [ -e "$UNIT_BACKUP" ] || [ -L "$UNIT_BACKUP" ]; then
+    echo "ERROR: existing systemd backup: $UNIT_BACKUP" >&2
+    exit 1
+fi
 
 if systemctl is-active --quiet "$SERVICE_NAME"; then
     echo "ERROR: $SERVICE_NAME is running." >&2
@@ -76,8 +196,8 @@ if systemctl is-active --quiet "$SERVICE_NAME"; then
     exit 1
 fi
 
-install -d -o root -g root -m 0755 "$RUNTIME_PARENT"
-rm -rf "$BUILD_DIR" "$OLD_DIR"
+# The lock is held and all artifact paths were checked.
+BUILD_OWNED=1
 install -d -o root -g root -m 0755 "$BUILD_DIR"
 
 # The system interpreter is not required to have a global pip installation.
@@ -110,42 +230,37 @@ if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
 fi
 WHEEL_PATH=$1
 
+# Enter the transaction before moving the previous runtime.
 if [ -d "$RUNTIME_DIR" ]; then
+    HAD_RUNTIME=1
+fi
+
+DEPLOYMENT_STARTED=1
+
+if [ "$HAD_RUNTIME" -eq 1 ]; then
     mv "$RUNTIME_DIR" "$OLD_DIR"
 fi
 
-rollback_runtime() {
-    rm -rf "$RUNTIME_DIR"
-    if [ -d "$OLD_DIR" ]; then
-        mv "$OLD_DIR" "$RUNTIME_DIR"
-    fi
-}
-
 if ! install -d -o root -g root -m 0755 "$RUNTIME_DIR"; then
-    rollback_runtime
     exit 1
 fi
 
 # Important: create the venv at its final path. Python entry points embed
 # an absolute interpreter path in their shebang and are not safely movable.
 if ! "$PYTHON_BIN" -m venv "$RUNTIME_DIR/venv"; then
-    rollback_runtime
     exit 1
 fi
 
 if ! "$RUNTIME_DIR/venv/bin/python" -m pip install --upgrade pip; then
-    rollback_runtime
     exit 1
 fi
 
 if ! "$RUNTIME_DIR/venv/bin/pip" install "$WHEEL_PATH"; then
-    rollback_runtime
     exit 1
 fi
 
 if [ ! -x "$RUNTIME_DIR/venv/bin/homelab-console" ]; then
     echo "ERROR: homelab-console entry point was not created." >&2
-    rollback_runtime
     exit 1
 fi
 
@@ -153,14 +268,10 @@ EXPECTED_SHEBANG="#!$RUNTIME_DIR/venv/bin/python"
 ACTUAL_SHEBANG=$(sed -n '1p' "$RUNTIME_DIR/venv/bin/homelab-console")
 if [ "$ACTUAL_SHEBANG" != "$EXPECTED_SHEBANG" ]; then
     echo "ERROR: invalid homelab-console shebang: $ACTUAL_SHEBANG" >&2
-    rollback_runtime
     exit 1
 fi
 
-rm -rf "$OLD_DIR"
-rm -rf "$BUILD_DIR"
-trap - EXIT HUP INT TERM
-
+# Configuration and systemd setup remain inside the transaction.
 install -d -o root -g root -m 0755 "$CONFIG_DIR"
 copy_initial_config "$CONFIG_DIR/config.yaml" "config.yaml" "config.example.yaml"
 copy_initial_config "$CONFIG_DIR/services.yaml" "services.yaml" "services.example.yaml"
@@ -168,6 +279,15 @@ copy_initial_config "$CONFIG_DIR/services.yaml" "services.yaml" "services.exampl
 RUNTIME_ESCAPED=$(escape_sed "$RUNTIME_DIR")
 VENV_ESCAPED=$(escape_sed "$RUNTIME_DIR/venv/bin")
 CONFIG_ESCAPED=$(escape_sed "$CONFIG_DIR")
+
+# Preserve the original unit before writing a replacement.
+if [ -f "$SERVICE_PATH" ]; then
+    HAD_SERVICE_UNIT=1
+    cp -p "$SERVICE_PATH" "$UNIT_BACKUP"
+fi
+
+# From this point, any error must restore the previous unit too.
+UNIT_REPLACEMENT_STARTED=1
 
 sed \
     -e "s|@RUNTIME_DIR@|$RUNTIME_ESCAPED|g" \
@@ -178,6 +298,11 @@ chown root:root "$SERVICE_PATH"
 chmod 0644 "$SERVICE_PATH"
 
 systemctl daemon-reload
+
+# No rollback after this point: the new runtime is ready.
+DEPLOYMENT_COMMITTED=1
+rm -rf "$OLD_DIR"
+rm -f "$UNIT_BACKUP"
 
 echo
 echo "Installed root-owned TouchRack runtime:"

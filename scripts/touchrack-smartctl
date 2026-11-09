@@ -20,4 +20,4 @@ if [ ! -r "$ALLOWLIST" ] || ! grep -Fx -- "$device" "$ALLOWLIST" >/dev/null; the
     exit 77
 fi
 
-exec "$SMARTCTL" -a -j "$device"
+exec "$SMARTCTL" -a -n standby,3 -j "$device"
