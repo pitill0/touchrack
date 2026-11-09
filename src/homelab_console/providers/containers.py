@@ -283,14 +283,21 @@ def _index_stats(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 def _matching_stats(
     identifier: str, stats_by_id: dict[str, dict[str, Any]]
 ) -> dict[str, Any]:
-    return next(
-        (
-            value
-            for stats_id, value in stats_by_id.items()
-            if identifier.startswith(stats_id) or stats_id.startswith(identifier)
-        ),
-        {},
-    )
+    if not identifier:
+        return {}
+
+    matches = [
+        value
+        for stats_id, value in stats_by_id.items()
+        if stats_id
+        and (
+            identifier.startswith(stats_id)
+            or stats_id.startswith(identifier)
+        )
+    ]
+    # Never attribute unrelated statistics to a container when a short
+    # identifier matches multiple possible full IDs.
+    return matches[0] if len(matches) == 1 else {}
 
 
 def _podman_sort_key(row: dict[str, Any]) -> tuple[int, str]:

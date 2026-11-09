@@ -43,7 +43,7 @@ async def test_smartctl_provider_collects_nvme_health(monkeypatch) -> None:
 
     def fake_run(*args: str):
         calls.append(args)
-        return _result(scan if "--scan-open" in args else device)
+        return _result(scan if "--scan" in args else device)
 
     monkeypatch.setattr(provider, "_run", fake_run)
 
@@ -65,7 +65,7 @@ async def test_smartctl_provider_collects_nvme_health(monkeypatch) -> None:
     assert disk.power_on_hours == 8214
     assert disk.percentage_used == 7
     assert dict(disk.details)["WEAR USED"] == "7%"
-    assert calls[0] == ("--scan-open", "-j")
+    assert calls[0] == ("--scan", "-j")
 
 
 @pytest.mark.asyncio
@@ -98,7 +98,7 @@ async def test_smartctl_provider_accepts_useful_json_from_nonzero_exit(monkeypat
     monkeypatch.setattr(
         provider,
         "_run",
-        lambda *args: _result(scan if "--scan-open" in args else failed),
+        lambda *args: _result(scan if "--scan" in args else failed),
     )
 
     snapshot = await provider.collect()
@@ -139,7 +139,7 @@ async def test_smartctl_provider_filters_and_preserves_configured_device_order(
     probed: list[str] = []
 
     def fake_run(*args: str):
-        if "--scan-open" in args:
+        if "--scan" in args:
             return _result(scan)
         name = next(arg for arg in args if arg.startswith("/dev/"))
         probed.append(name)
@@ -171,7 +171,7 @@ async def test_smartctl_provider_probes_configured_device_missing_from_scan(
     monkeypatch.setattr(
         provider,
         "_run",
-        lambda *args: _result(scan if "--scan-open" in args else direct),
+        lambda *args: _result(scan if "--scan" in args else direct),
     )
 
     snapshot = await provider.collect()
@@ -206,7 +206,7 @@ async def test_smartctl_provider_reuses_inflight_probe_after_caller_cancellation
 
     def slow_run(*args: str):
         nonlocal scan_calls
-        if "--scan-open" in args:
+        if "--scan" in args:
             scan_calls += 1
             started.set()
             assert release.wait(timeout=2.0)

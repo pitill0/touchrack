@@ -129,6 +129,8 @@ class StorageDetailScreen(ModalScreen[None]):
 
 
 def disk_health_label(disk: DiskHealthInfo) -> tuple[str, str]:
+    if disk.standby:
+        return "STANDBY", "unknown"
     if disk.smart_passed is False:
         return "● FAIL", "critical"
     if disk.smart_passed is True:
