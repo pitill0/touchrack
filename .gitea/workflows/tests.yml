@@ -71,6 +71,6 @@ jobs:
             --reinstall "$TEMP_ROOT"/dist/touchrack-*.whl
 
           "$PYTHON" -c \
-            'import homelab_console; assert homelab_console.__version__ == "5.0.0"'
+            'from importlib.metadata import version; import homelab_console; assert homelab_console.__version__ == version("touchrack")'
 
           echo "PASS: CRUX tests, wheel audit and smoke test"

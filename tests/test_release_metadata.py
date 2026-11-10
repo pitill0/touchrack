@@ -14,8 +14,7 @@ def test_project_metadata_is_release_ready_and_version_is_synced() -> None:
 
     assert project["name"] == "touchrack"
     assert project["version"] == homelab_console.__version__
-    assert project["version"] == "5.0.0"
-    assert "> Current release: **v5.0.0**." in (ROOT / "README.md").read_text()
+    assert f"> Current release: **v{project['version']}**." in (ROOT / "README.md").read_text()
     assert project["readme"] == "README.md"
     assert project["license"] == "MIT"
     assert "Environment :: Console" in project["classifiers"]

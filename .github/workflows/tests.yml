@@ -55,11 +55,11 @@ jobs:
       - name: Smoke-test built wheel
         run: |
           python -m pip install --force-reinstall --no-deps dist/touchrack-*.whl
-          python -c 'import homelab_console; assert homelab_console.__version__ == "5.0.0"'
+          python -c 'from importlib.metadata import version; import homelab_console; assert homelab_console.__version__ == version("touchrack")'
       - name: Preserve validated release wheel
         uses: actions/upload-artifact@v4
         with:
-          name: touchrack-5.0.0-wheel
+          name: touchrack-wheel
           path: dist/touchrack-*.whl
           if-no-files-found: error
           retention-days: 14
