@@ -30,8 +30,8 @@ def test_ci_builds_and_audits_release_wheel() -> None:
     assert 'assert "homelab_console/providers/remote_disk_health.py" in names' in workflow_text
     assert 'assert not any(name.startswith("tests/")' in workflow_text
     assert "Smoke-test built wheel" in workflow_text
-    assert "homelab_console.__version__ == \"5.0.0\"" in workflow_text
+    assert 'homelab_console.__version__ == version("touchrack")' in workflow_text
     assert "uses: actions/upload-artifact@v4" in workflow_text
-    assert "name: touchrack-5.0.0-wheel" in workflow_text
+    assert "name: touchrack-wheel" in workflow_text
     assert "path: dist/touchrack-*.whl" in workflow_text
     assert "if-no-files-found: error" in workflow_text
