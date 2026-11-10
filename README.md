@@ -9,7 +9,7 @@ Wayland, browser or desktop environment required.
 The application is built with [Textual](https://textual.textualize.io/) and
 reads the touchscreen directly through Linux `evdev`.
 
-> Current release: **v5.0.0**. Read-only by design.
+> Current release: **v5.0.1**. Read-only by design.
 
 <p align="center">
   <img
